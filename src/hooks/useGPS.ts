@@ -1,0 +1,542 @@
+// ============================================================================
+// Multi-tier GPS Hook with Dead Reckoning
+// ============================================================================
+
+import { useState, useRef, useCallback, useEffect } from "react";
+import type {
+  GpsQuality,
+  GpsPoint,
+  SmoothGpsState,
+  DeadReckoningState,
+  LogEvent,
+} from "@/types/taximeter";
+import { GPS_CONSTANTS } from "@/types/taximeter";
+import { haversineMeters } from "@/utils/haversine";
+
+export interface UseGPSReturn {
+  smoothState: SmoothGpsState | null;
+  deadReckoning: DeadReckoningState;
+  recentPoints: GpsPoint[];
+  isWatching: boolean;
+  startWatching: () => void;
+  stopWatching: () => void;
+  addSimulatedPoint: (lat: number, lon: number, speed: number) => void;
+  events: LogEvent[];
+  addEvent: (type: LogEvent["type"], message: string, data?: Record<string, unknown>) => void;
+  clearEvents: () => void;
+  totalDistanceM: number;
+  isSimulating: boolean;
+  setSimulating: (v: boolean) => void;
+}
+
+let eventIdCounter = 0;
+
+function classifyAccuracy(accuracy: number): GpsQuality {
+  if (accuracy <= GPS_CONSTANTS.GOOD_THRESHOLD) return "good";
+  if (accuracy <= GPS_CONSTANTS.DEGRADED_THRESHOLD) return "degraded";
+  if (accuracy <= GPS_CONSTANTS.POOR_THRESHOLD) return "poor";
+  return "dead_reck";
+}
+
+function createEvent(
+  type: LogEvent["type"],
+  message: string,
+  data?: Record<string, unknown>,
+): LogEvent {
+  return {
+    id: `evt-${++eventIdCounter}`,
+    timestamp: Date.now(),
+    type,
+    message,
+    data,
+  };
+}
+
+export function useGPS(): UseGPSReturn {
+  const [smoothState, setSmoothState] = useState<SmoothGpsState | null>(null);
+  const [deadReckoning, setDeadReckoning] = useState<DeadReckoningState>({
+    active: false,
+    elapsedSinceLastGPS: 0,
+    lastSpeed: 0,
+    decayFactor: 1,
+    estimatedLat: 0,
+    estimatedLon: 0,
+    heading: null,
+  });
+  const [recentPoints, setRecentPoints] = useState<GpsPoint[]>([]);
+  const [isWatching, setIsWatching] = useState(false);
+  const [events, setEvents] = useState<LogEvent[]>([]);
+  const [totalDistanceM, setTotalDistanceM] = useState(0);
+  const [isSimulating, setIsSimulating] = useState(false);
+
+  // Refs for mutable state
+  const watchIdRef = useRef<number | null>(null);
+  const lastGoodPointRef = useRef<{ lat: number; lon: number } | null>(null);
+  const smoothLatRef = useRef(0);
+  const smoothLonRef = useRef(0);
+  const smoothSpeedRef = useRef(0);
+  const lastTimestampRef = useRef<number>(0);
+  const totalDistRef = useRef(0);
+  const isFirstFixRef = useRef(true);
+  const drTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const eventsRef = useRef<LogEvent[]>([]);
+  const smoothStateRef = useRef<SmoothGpsState | null>(null);
+  const deadReckoningRef = useRef<DeadReckoningState>({
+    active: false,
+    elapsedSinceLastGPS: 0,
+    lastSpeed: 0,
+    decayFactor: 1,
+    estimatedLat: 0,
+    estimatedLon: 0,
+    heading: null,
+  });
+  const lastGpsTimeRef = useRef<number>(Date.now());
+
+  const addEvent = useCallback(
+    (type: LogEvent["type"], message: string, data?: Record<string, unknown>) => {
+      const evt = createEvent(type, message, data);
+      eventsRef.current = [...eventsRef.current.slice(-199), evt];
+      setEvents(eventsRef.current);
+    },
+    [],
+  );
+
+  const clearEvents = useCallback(() => {
+    eventsRef.current = [];
+    setEvents([]);
+  }, []);
+
+  // Dead Reckoning timer — runs every 1 second when no GPS updates
+  const startDRTimer = useCallback(() => {
+    if (drTimerRef.current) return;
+
+    drTimerRef.current = setInterval(() => {
+      const now = Date.now();
+      const elapsedSinceLastGPS = (now - lastGpsTimeRef.current) / 1000;
+
+      if (elapsedSinceLastGPS > GPS_CONSTANTS.DR_TIMEOUT_MS / 1000) {
+        // Activate Dead Reckoning
+        const decayFactor = Math.max(
+          GPS_CONSTANTS.DR_DECAY_FACTOR,
+          1 - elapsedSinceLastGPS / 60,
+        );
+        const drSpeed = smoothSpeedRef.current * decayFactor;
+        const timeDelta = 1; // 1 second interval
+
+        // Estimate new position using last known heading or assumed forward
+        const heading = deadReckoningRef.current.heading ?? 0;
+        const headingRad = (heading * Math.PI) / 180;
+        const distanceDr = drSpeed * timeDelta;
+
+        // Approximate lat/lon change
+        const latDelta =
+          (distanceDr * Math.cos(headingRad)) / 111320;
+        const lonDelta =
+          (distanceDr * Math.sin(headingRad)) /
+          (111320 * Math.cos((smoothLatRef.current * Math.PI) / 180));
+
+        const estLat = smoothLatRef.current + latDelta;
+        const estLon = smoothLonRef.current + lonDelta;
+
+        const newDR: DeadReckoningState = {
+          active: true,
+          elapsedSinceLastGPS,
+          lastSpeed: smoothSpeedRef.current,
+          decayFactor,
+          estimatedLat: estLat,
+          estimatedLon: estLon,
+          heading: heading,
+        };
+
+        deadReckoningRef.current = newDR;
+        setDeadReckoning(newDR);
+
+        // Update smooth state with DR estimate
+        const drState: SmoothGpsState = {
+          lat: estLat,
+          lon: estLon,
+          accuracy: 999,
+          speed: drSpeed,
+          heading: heading,
+          timestamp: now,
+          quality: "dead_reck",
+        };
+        smoothStateRef.current = drState;
+        setSmoothState(drState);
+
+        addEvent("dr", `DR активен: ${drSpeed.toFixed(1)} м/с, затухание ${decayFactor.toFixed(2)}`, {
+          elapsedSinceLastGPS,
+          drSpeed,
+          decayFactor,
+        });
+      } else {
+        // Not yet in DR mode, but update elapsed time
+        const newDR: DeadReckoningState = {
+          ...deadReckoningRef.current,
+          elapsedSinceLastGPS,
+          active: false,
+        };
+        deadReckoningRef.current = newDR;
+        setDeadReckoning(newDR);
+      }
+    }, 1000);
+  }, [addEvent]);
+
+  const stopDRTimer = useCallback(() => {
+    if (drTimerRef.current) {
+      clearInterval(drTimerRef.current);
+      drTimerRef.current = null;
+    }
+  }, []);
+
+  // Process a GPS position update
+  const processPosition = useCallback(
+    (
+      lat: number,
+      lon: number,
+      accuracy: number,
+      speed: number | null,
+      heading: number | null,
+      timestamp: number,
+      isSim: boolean,
+    ) => {
+      const quality = isSim ? "sim" : classifyAccuracy(accuracy);
+
+      const gpsPoint: GpsPoint = {
+        lat,
+        lon,
+        accuracy,
+        speed,
+        heading,
+        timestamp,
+        quality,
+      };
+
+      setRecentPoints((prev) => [...prev.slice(-99), gpsPoint]);
+
+      // Update last GPS time (resets DR timer)
+      lastGpsTimeRef.current = timestamp;
+
+      if (quality === "dead_reck" && !isSim) {
+        // GPS rejected (>500m accuracy)
+        addEvent("gps", `GPS отклонён: точность ${accuracy.toFixed(0)}м`, { accuracy });
+        return;
+      }
+
+      // Jump Guard: detect speed jumps > 55 m/s
+      if (
+        !isFirstFixRef.current &&
+        speed !== null &&
+        speed > GPS_CONSTANTS.MAX_SPEED_M_S
+      ) {
+        addEvent("warn", `Скачок скорости обнаружен: ${(speed * 3.6).toFixed(0)} км/ч — игнорируем`, {
+          speed,
+          maxAllowed: GPS_CONSTANTS.MAX_SPEED_M_S,
+        });
+        // Don't update smooth state — use last good point
+        if (lastGoodPointRef.current) {
+          return;
+        }
+      }
+
+      // GPS Spoofing detection: check if position is unreasonably far
+      if (
+        !isFirstFixRef.current &&
+        lastGoodPointRef.current
+      ) {
+        const distFromLast = haversineMeters(
+          lastGoodPointRef.current.lat,
+          lastGoodPointRef.current.lon,
+          lat,
+          lon,
+        );
+        const timeDelta = (timestamp - lastTimestampRef.current) / 1000;
+        const maxAllowedDist = GPS_CONSTANTS.MAX_SPEED_M_S * timeDelta * 1.5;
+
+        if (distFromLast > maxAllowedDist && timeDelta > 1) {
+          addEvent(
+            "warn",
+            `Телепортация обнаружена: ${distFromLast.toFixed(0)}м за ${timeDelta.toFixed(1)}с — откат к последней точке`,
+            { distFromLast, maxAllowedDist, timeDelta },
+          );
+          // Don't update — keep last good point
+          return;
+        }
+      }
+
+      // Process based on quality tier
+      if (quality === "good" || quality === "sim") {
+        // Tier 1: Accept position and speed
+        if (isFirstFixRef.current) {
+          smoothLatRef.current = lat;
+          smoothLonRef.current = lon;
+          smoothSpeedRef.current = speed ?? 0;
+          isFirstFixRef.current = false;
+          lastGoodPointRef.current = { lat, lon };
+
+          const initialState: SmoothGpsState = {
+            lat,
+            lon,
+            accuracy,
+            speed: speed ?? 0,
+            heading,
+            timestamp,
+            quality,
+          };
+          smoothStateRef.current = initialState;
+          setSmoothState(initialState);
+          addEvent("gps", `Первый GPS fix: точность ${accuracy.toFixed(0)}м`, {
+            lat,
+            lon,
+            accuracy,
+          });
+        } else {
+          // EMA smoothing
+          const alpha = GPS_CONSTANTS.EMA_ALPHA;
+          const newSmoothLat =
+            smoothLatRef.current * (1 - alpha) + lat * alpha;
+          const newSmoothLon =
+            smoothLonRef.current * (1 - alpha) + lon * alpha;
+          const newSpeed = speed ?? smoothSpeedRef.current;
+
+          // Calculate distance using Haversine between smoothed positions
+          const distDelta = haversineMeters(
+            smoothLatRef.current,
+            smoothLonRef.current,
+            newSmoothLat,
+            newSmoothLon,
+          );
+
+          // Minimum movement filter
+          if (distDelta >= GPS_CONSTANTS.MIN_MOVEMENT_M) {
+            totalDistRef.current += distDelta;
+            setTotalDistanceM(totalDistRef.current);
+          }
+
+          smoothLatRef.current = newSmoothLat;
+          smoothLonRef.current = newSmoothLon;
+          smoothSpeedRef.current = newSpeed;
+          lastGoodPointRef.current = { lat: newSmoothLat, lon: newSmoothLon };
+
+          const newState: SmoothGpsState = {
+            lat: newSmoothLat,
+            lon: newSmoothLon,
+            accuracy,
+            speed: newSpeed,
+            heading,
+            timestamp,
+            quality,
+          };
+          smoothStateRef.current = newState;
+          setSmoothState(newState);
+
+          if (distDelta >= GPS_CONSTANTS.MIN_MOVEMENT_M) {
+            addEvent("gps", `Позиция обновлена: +${distDelta.toFixed(1)}м, скорость ${(newSpeed * 3.6).toFixed(0)} км/ч`, {
+              distDelta,
+              speedKmh: newSpeed * 3.6,
+              accuracy,
+            });
+          }
+        }
+      } else if (quality === "degraded") {
+        // Tier 2: Accept position cautiously, prefer Doppler speed
+        if (isFirstFixRef.current) {
+          smoothLatRef.current = lat;
+          smoothLonRef.current = lon;
+          smoothSpeedRef.current = speed ?? 0;
+          isFirstFixRef.current = false;
+          lastGoodPointRef.current = { lat, lon };
+
+          const initState: SmoothGpsState = {
+            lat,
+            lon,
+            accuracy,
+            speed: speed ?? 0,
+            heading,
+            timestamp,
+            quality,
+          };
+          smoothStateRef.current = initState;
+          setSmoothState(initState);
+        } else {
+          const timeDelta = (timestamp - lastTimestampRef.current) / 1000;
+          const newSpeed = speed ?? smoothSpeedRef.current;
+
+          // Prefer Doppler speed for distance calculation
+          const distBySpeed = newSpeed * timeDelta;
+
+          smoothLatRef.current = lat;
+          smoothLonRef.current = lon;
+          smoothSpeedRef.current = newSpeed;
+          lastGoodPointRef.current = { lat, lon };
+
+          if (distBySpeed >= GPS_CONSTANTS.MIN_MOVEMENT_M) {
+            totalDistRef.current += distBySpeed;
+            setTotalDistanceM(totalDistRef.current);
+          }
+
+          const newState: SmoothGpsState = {
+            lat,
+            lon,
+            accuracy,
+            speed: newSpeed,
+            heading,
+            timestamp,
+            quality,
+          };
+          smoothStateRef.current = newState;
+          setSmoothState(newState);
+
+          addEvent("gps", `Degraded GPS: скорость ${(newSpeed * 3.6).toFixed(0)} км/ч`, {
+            accuracy,
+            distBySpeed,
+          });
+        }
+      } else if (quality === "poor") {
+        // Tier 3: Ignore position, use Doppler speed only
+        if (isFirstFixRef.current) {
+          smoothSpeedRef.current = speed ?? 0;
+          isFirstFixRef.current = false;
+          lastGoodPointRef.current = { lat, lon };
+          smoothLatRef.current = lat;
+          smoothLonRef.current = lon;
+        } else {
+          const timeDelta = (timestamp - lastTimestampRef.current) / 1000;
+          const newSpeed = speed ?? smoothSpeedRef.current;
+          const distBySpeed = newSpeed * timeDelta;
+
+          smoothSpeedRef.current = newSpeed;
+
+          if (distBySpeed >= GPS_CONSTANTS.MIN_MOVEMENT_M) {
+            totalDistRef.current += distBySpeed;
+            setTotalDistanceM(totalDistRef.current);
+          }
+
+          const newState: SmoothGpsState = {
+            lat: smoothLatRef.current,
+            lon: smoothLonRef.current,
+            accuracy,
+            speed: newSpeed,
+            heading,
+            timestamp,
+            quality: "poor",
+          };
+          smoothStateRef.current = newState;
+          setSmoothState(newState);
+        }
+      }
+
+      lastTimestampRef.current = timestamp;
+    },
+    [addEvent],
+  );
+
+  // WatchPosition handler
+  const handlePosition = useCallback(
+    (pos: GeolocationPosition) => {
+      const { latitude, longitude, accuracy, speed, heading } = pos.coords;
+      processPosition(
+        latitude,
+        longitude,
+        accuracy,
+        speed,
+        heading,
+        pos.timestamp,
+        false,
+      );
+    },
+    [processPosition],
+  );
+
+  const handleError = useCallback(
+    (err: GeolocationPositionError) => {
+      addEvent("error", `GPS ошибка: ${err.message}`, { code: err.code });
+    },
+    [addEvent],
+  );
+
+  // Start watching GPS
+  const startWatching = useCallback(() => {
+    if (watchIdRef.current !== null) return;
+
+    if (!navigator.geolocation) {
+      addEvent("error", "Geolocation не поддерживается браузером");
+      return;
+    }
+
+    const watchId = navigator.geolocation.watchPosition(
+      handlePosition,
+      handleError,
+      {
+        enableHighAccuracy: true,
+        timeout: 10000,
+        maximumAge: 0,
+      },
+    );
+
+    watchIdRef.current = watchId as unknown as number;
+    setIsWatching(true);
+    addEvent("system", "GPS отслеживание запущено");
+    startDRTimer();
+  }, [handlePosition, handleError, addEvent, startDRTimer]);
+
+  // Stop watching GPS
+  const stopWatching = useCallback(() => {
+    if (watchIdRef.current !== null) {
+      navigator.geolocation.clearPositionListener?.(
+        watchIdRef.current as unknown as number,
+      );
+      watchIdRef.current = null;
+    }
+    setIsWatching(false);
+    stopDRTimer();
+    addEvent("system", "GPS отслеживание остановлено");
+  }, [addEvent, stopDRTimer]);
+
+  // Add simulated point
+  const addSimulatedPoint = useCallback(
+    (lat: number, lon: number, speed: number) => {
+      const now = Date.now();
+      processPosition(lat, lon, 10 + Math.random() * 10, speed, null, now, true);
+    },
+    [processPosition],
+  );
+
+  // Set simulating
+  const setSimulating = useCallback(
+    (v: boolean) => {
+      setIsSimulating(v);
+      if (v) {
+        stopWatching();
+        addEvent("system", "Симулятор GPS активирован");
+      } else {
+        addEvent("system", "Реальный GPS активирован");
+        startWatching();
+      }
+    },
+    [stopWatching, startWatching, addEvent],
+  );
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      stopDRTimer();
+    };
+  }, [stopDRTimer]);
+
+  return {
+    smoothState,
+    deadReckoning,
+    recentPoints,
+    isWatching,
+    startWatching,
+    stopWatching,
+    addSimulatedPoint,
+    events,
+    addEvent,
+    clearEvents,
+    totalDistanceM,
+    isSimulating,
+    setSimulating,
+  };
+}
