@@ -474,7 +474,7 @@ export function useGPS(): UseGPSReturn {
       },
     );
 
-    watchIdRef.current = watchId as unknown as number;
+    watchIdRef.current = watchId;
     setIsWatching(true);
     addEvent("system", "GPS отслеживание запущено");
     startDRTimer();
@@ -483,9 +483,7 @@ export function useGPS(): UseGPSReturn {
   // Stop watching GPS
   const stopWatching = useCallback(() => {
     if (watchIdRef.current !== null) {
-      navigator.geolocation.clearPositionListener?.(
-        watchIdRef.current as unknown as number,
-      );
+      navigator.geolocation.clearWatch(watchIdRef.current);
       watchIdRef.current = null;
     }
     setIsWatching(false);
