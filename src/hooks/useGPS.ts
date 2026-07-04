@@ -151,6 +151,12 @@ export function useGPS(): UseGPSReturn {
         deadReckoningRef.current = newDR;
         setDeadReckoning(newDR);
 
+        // Accumulate distance traveled during DR
+        if (distanceDr >= GPS_CONSTANTS.MIN_MOVEMENT_M) {
+          totalDistRef.current += distanceDr;
+          setTotalDistanceM(totalDistRef.current);
+        }
+
         // Update smooth state with DR estimate
         const drState: SmoothGpsState = {
           lat: estLat,

@@ -47,6 +47,18 @@ interface TripMapProps {
   toCoords: [number, number] | null;
 }
 
+// Remove "Leaflet" prefix from the attribution control
+function AttributionCleaner() {
+  const map = useMap();
+
+  useEffect(() => {
+    // Remove the default "Leaflet" prefix text from attribution control
+    map.attributionControl?.setPrefix(false);
+  }, [map]);
+
+  return null;
+}
+
 // Auto-fit map to show all markers
 function MapBoundsUpdater({ route, fromCoords, toCoords }: { route: PlannedRoute | null; fromCoords: [number, number] | null; toCoords: [number, number] | null }) {
   const map = useMap();
@@ -175,10 +187,11 @@ export default function TripMap({
         zoomControl={false}
       >
         <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a>'
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OSM</a> <a href="https://carto.com/">CARTO</a>'
+          url="https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png"
         />
 
+        <AttributionCleaner />
         <MapBoundsUpdater route={route} fromCoords={fromCoords} toCoords={toCoords} />
 
         {/* Planned Route — синяя линия */}
