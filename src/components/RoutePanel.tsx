@@ -249,24 +249,43 @@ export default function RoutePanel({
   const [fromPlace, setFromPlace] = useState<GeocodedPlace | null>(null);
   const [toPlace, setToPlace] = useState<GeocodedPlace | null>(null);
 
+  /** Форматирует displayName Nominatim в читаемый краткий адрес */
+  const formatAddress = useCallback((displayName: string): string => {
+    const parts = displayName.split(",").map((s) => s.trim());
+    // Отфильтровываем: Россия, почтовые индексы, федеральные округа
+    const filtered = parts.filter((p) => {
+      const lower = p.toLowerCase();
+      return (
+        lower !== "россия" &&
+        lower !== "russia" &&
+        !/^\d{6}$/.test(p) &&
+        !lower.includes("федеральный округ") &&
+        !lower.includes("федерал") &&
+        !lower.includes("federal")
+      );
+    });
+    // Показываем до 3 значимых частей: улица, дом, город/район
+    return filtered.slice(0, 3).join(", ");
+  }, []);
+
   const handleFromSelect = useCallback(
     (place: GeocodedPlace) => {
       setFromPlace(place);
       onFromCoords([place.lat, place.lon]);
-      setFromAddress(place.displayName.split(",")[0]);
+      setFromAddress(formatAddress(place.displayName));
       setError(null);
     },
-    [onFromCoords],
+    [onFromCoords, formatAddress],
   );
 
   const handleToSelect = useCallback(
     (place: GeocodedPlace) => {
       setToPlace(place);
       onToCoords([place.lat, place.lon]);
-      setToAddress(place.displayName.split(",")[0]);
+      setToAddress(formatAddress(place.displayName));
       setError(null);
     },
-    [onToCoords],
+    [onToCoords, formatAddress],
   );
 
   const handleFromClear = useCallback(() => {
