@@ -1,21 +1,19 @@
 // ============================================================================
-// RoutePanel — Панель ввода адресов и построения маршрута
+// RoutePanel — Панель ввода адресов с автодополнением
 // ============================================================================
 
-import { useState, useCallback } from "react";
-import { Input } from "@/components/ui/input";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { Button } from "@/components/ui/button";
-import { Switch } from "@/components/ui/switch";
-import { Label } from "@/components/ui/label";
+import { Input } from "@/components/ui/input";
 import {
   Navigation,
   MapPin,
   ArrowRight,
   Loader2,
-  Settings2,
+  Search,
 } from "lucide-react";
 import type { GeocodedPlace, PlannedRoute } from "@/types/taximeter";
-import { geocodeAddress, getRoute } from "@/utils/routing";
+import { searchAddresses, geocodeAddress, getRoute } from "@/utils/routing";
 import { cn } from "@/lib/utils";
 
 interface RoutePanelProps {
@@ -24,6 +22,219 @@ interface RoutePanelProps {
   onToCoords: (coords: [number, number] | null) => void;
   isInTrip: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Вспомогательный компонент: поле ввода с автодополнением
+// ---------------------------------------------------------------------------
+
+interface AddressInputProps {
+  placeholder: string;
+  icon: React.ReactNode;
+  dotColor: string;
+  value: string;
+  onChange: (val: string) => void;
+  onSelect: (place: GeocodedPlace) => void;
+  onClear: () => void;
+  disabled: boolean;
+}
+
+function AddressInput({
+  placeholder,
+  icon,
+  dotColor,
+  value,
+  onChange,
+  onSelect,
+  onClear,
+  disabled,
+}: AddressInputProps) {
+  const [suggestions, setSuggestions] = useState<GeocodedPlace[]>([]);
+  const [isSearching, setIsSearching] = useState(false);
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [activeIdx, setActiveIdx] = useState(-1);
+  const [selected, setSelected] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Закрываем дропдаун при клике вне компонента
+  useEffect(() => {
+    function handleClickOutside(e: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) {
+        setShowDropdown(false);
+        setActiveIdx(-1);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  // Очищаем таймер при размонтировании
+  useEffect(() => {
+    return () => {
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+    };
+  }, []);
+
+  const handleInputChange = useCallback(
+    (e: React.ChangeEvent<HTMLInputElement>) => {
+      const val = e.target.value;
+      onChange(val);
+
+      if (!val) {
+        onClear();
+        setSelected(false);
+        setSuggestions([]);
+        setShowDropdown(false);
+        setActiveIdx(-1);
+        return;
+      }
+
+      setSelected(false);
+      setActiveIdx(-1);
+
+      // Debounced search
+      if (debounceRef.current) clearTimeout(debounceRef.current);
+
+      debounceRef.current = setTimeout(async () => {
+        if (val.trim().length < 2) {
+          setSuggestions([]);
+          setShowDropdown(false);
+          return;
+        }
+
+        setIsSearching(true);
+        const results = await searchAddresses(val.trim());
+        setSuggestions(results);
+        setShowDropdown(results.length > 0);
+        setIsSearching(false);
+      }, 300);
+    },
+    [onChange, onClear],
+  );
+
+  const handleSelect = useCallback(
+    (place: GeocodedPlace) => {
+      onSelect(place);
+      setSelected(true);
+      setShowDropdown(false);
+      setSuggestions([]);
+      setActiveIdx(-1);
+    },
+    [onSelect],
+  );
+
+  const handleKeyDown = useCallback(
+    (e: React.KeyboardEvent) => {
+      if (!showDropdown || suggestions.length === 0) {
+        if (e.key === "Enter" && value.trim() && !selected) {
+          // Если ничего не выбрано и нажали Enter — ищем напрямую
+          e.preventDefault();
+          geocodeAddress(value.trim()).then((place) => {
+            if (place) handleSelect(place);
+          });
+        }
+        return;
+      }
+
+      switch (e.key) {
+        case "ArrowDown":
+          e.preventDefault();
+          setActiveIdx((prev) => (prev < suggestions.length - 1 ? prev + 1 : 0));
+          break;
+        case "ArrowUp":
+          e.preventDefault();
+          setActiveIdx((prev) => (prev > 0 ? prev - 1 : suggestions.length - 1));
+          break;
+        case "Enter":
+          e.preventDefault();
+          if (activeIdx >= 0 && activeIdx < suggestions.length) {
+            handleSelect(suggestions[activeIdx]);
+          }
+          break;
+        case "Escape":
+          setShowDropdown(false);
+          setActiveIdx(-1);
+          break;
+      }
+    },
+    [showDropdown, suggestions, activeIdx, handleSelect, value, selected],
+  );
+
+  // Сокращаем displayName для отображения в списке
+  const formatSuggestion = (place: GeocodedPlace): { main: string; sub: string } => {
+    const parts = place.displayName.split(",").map((s) => s.trim());
+    // Часто структура: "Улица, Дом, Район, Город, Область, Страна, Индекс"
+    // Берём первые 2-3 значимые части
+    const main = parts.slice(0, 2).join(", ");
+    const sub = parts.slice(2, 5).join(", ");
+    return { main, sub };
+  };
+
+  return (
+    <div ref={containerRef} className="relative">
+      <div className="relative">
+        {icon}
+        <Input
+          ref={inputRef}
+          placeholder={placeholder}
+          value={value}
+          onChange={handleInputChange}
+          onKeyDown={handleKeyDown}
+          onFocus={() => {
+            if (suggestions.length > 0 && !selected) setShowDropdown(true);
+          }}
+          disabled={disabled}
+          className="pl-10 pr-10 bg-white/5 border-white/10 text-white placeholder:text-white/30"
+        />
+        <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1">
+          {isSearching ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin text-white/30" />
+          ) : selected ? (
+            <div className={cn("w-2 h-2 rounded-full", dotColor)} />
+          ) : null}
+        </div>
+      </div>
+
+      {/* Выпадающий список подсказок */}
+      {showDropdown && suggestions.length > 0 && (
+        <div className="absolute z-50 left-0 right-0 mt-1 bg-slate-900 border border-white/10 rounded-lg shadow-2xl overflow-hidden">
+          {suggestions.map((place, idx) => {
+            const { main, sub } = formatSuggestion(place);
+            return (
+              <button
+                key={`${place.lat}-${place.lon}-${idx}`}
+                type="button"
+                className={cn(
+                  "w-full text-left px-3 py-2.5 transition-colors duration-100 flex items-start gap-3",
+                  "hover:bg-white/5 border-b border-white/5 last:border-0",
+                  idx === activeIdx && "bg-white/10",
+                )}
+                onMouseDown={(e) => {
+                  e.preventDefault(); // предотвращаем blur
+                  handleSelect(place);
+                }}
+                onMouseEnter={() => setActiveIdx(idx)}
+              >
+                <Search className="h-4 w-4 text-white/30 mt-0.5 shrink-0" />
+                <div className="min-w-0">
+                  <p className="text-sm text-white truncate">{main}</p>
+                  {sub && sub !== main && (
+                    <p className="text-[11px] text-white/40 truncate mt-0.5">{sub}</p>
+                  )}
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// RoutePanel
+// ---------------------------------------------------------------------------
 
 export default function RoutePanel({
   onRouteReady,
@@ -38,53 +249,35 @@ export default function RoutePanel({
   const [fromPlace, setFromPlace] = useState<GeocodedPlace | null>(null);
   const [toPlace, setToPlace] = useState<GeocodedPlace | null>(null);
 
-  const handleFromChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const val = e.target.value;
-      setFromAddress(val);
-      if (!val) {
-        setFromPlace(null);
-        onFromCoords(null);
-      }
+  const handleFromSelect = useCallback(
+    (place: GeocodedPlace) => {
+      setFromPlace(place);
+      onFromCoords([place.lat, place.lon]);
+      setFromAddress(place.displayName.split(",")[0]);
+      setError(null);
     },
     [onFromCoords],
   );
 
-  const handleToChange = useCallback(
-    (e: React.ChangeEvent<HTMLInputElement>) => {
-      const val = e.target.value;
-      setToAddress(val);
-      if (!val) {
-        setToPlace(null);
-        onToCoords(null);
-      }
+  const handleToSelect = useCallback(
+    (place: GeocodedPlace) => {
+      setToPlace(place);
+      onToCoords([place.lat, place.lon]);
+      setToAddress(place.displayName.split(",")[0]);
+      setError(null);
     },
     [onToCoords],
   );
 
-  const handleGeocodeFrom = useCallback(async () => {
-    if (!fromAddress.trim()) return;
-    const result = await geocodeAddress(fromAddress.trim());
-    if (result) {
-      setFromPlace(result);
-      onFromCoords([result.lat, result.lon]);
-      setFromAddress(result.displayName.split(",")[0]);
-    } else {
-      setError("Не удалось найти адрес");
-    }
-  }, [fromAddress, onFromCoords]);
+  const handleFromClear = useCallback(() => {
+    setFromPlace(null);
+    onFromCoords(null);
+  }, [onFromCoords]);
 
-  const handleGeocodeTo = useCallback(async () => {
-    if (!toAddress.trim()) return;
-    const result = await geocodeAddress(toAddress.trim());
-    if (result) {
-      setToPlace(result);
-      onToCoords([result.lat, result.lon]);
-      setToAddress(result.displayName.split(",")[0]);
-    } else {
-      setError("Не удалось найти адрес");
-    }
-  }, [toAddress, onToCoords]);
+  const handleToClear = useCallback(() => {
+    setToPlace(null);
+    onToCoords(null);
+  }, [onToCoords]);
 
   const handleBuildRoute = useCallback(async () => {
     if (!fromPlace || !toPlace) {
@@ -124,26 +317,28 @@ export default function RoutePanel({
   }, [toAddress, fromAddress, toPlace, fromPlace, onFromCoords, onToCoords]);
 
   return (
-    <div className="space-y-3">
-      {/* From address */}
-      <div className="relative">
-        <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-green-400" />
-        <Input
-          placeholder="Откуда?"
-          value={fromAddress}
-          onChange={handleFromChange}
-          onBlur={handleGeocodeFrom}
-          disabled={isInTrip || isLoading}
-          className="pl-10 bg-white/5 border-white/10 text-white placeholder:text-white/30"
-        />
-        {fromPlace && (
-          <div className="absolute right-3 top-1/2 -translate-y-1/2">
-            <div className="w-2 h-2 rounded-full bg-green-400" />
-          </div>
-        )}
-      </div>
+    <div className="space-y-3" role="search" aria-label="Ввод адресов маршрута">
+      {/* Откуда */}
+      <AddressInput
+        placeholder="Откуда?"
+        icon={
+          <MapPin className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-green-400 pointer-events-none" />
+        }
+        dotColor="bg-green-400"
+        value={fromAddress}
+        onChange={(val) => {
+          setFromAddress(val);
+          if (!val) {
+            setFromPlace(null);
+            onFromCoords(null);
+          }
+        }}
+        onSelect={handleFromSelect}
+        onClear={handleFromClear}
+        disabled={isInTrip || isLoading}
+      />
 
-      {/* Swap button */}
+      {/* Кнопка обмена адресов */}
       <div className="flex justify-center -my-1 relative z-10">
         <Button
           variant="ghost"
@@ -151,35 +346,38 @@ export default function RoutePanel({
           className="h-6 w-6 rounded-full bg-black/60 border border-white/10 hover:bg-white/10"
           onClick={handleSwapAddresses}
           disabled={isInTrip}
+          title="Поменять местами"
         >
           <ArrowRight className="h-3 w-3 text-white/60 rotate-90" />
         </Button>
       </div>
 
-      {/* To address */}
-      <div className="relative">
-        <Navigation className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-red-400" />
-        <Input
-          placeholder="Куда?"
-          value={toAddress}
-          onChange={handleToChange}
-          onBlur={handleGeocodeTo}
-          disabled={isInTrip || isLoading}
-          className="pl-10 bg-white/5 border-white/10 text-white placeholder:text-white/30"
-        />
-        {toPlace && (
-          <div className="absolute right-3 top-1/2 -translate-y-1/2">
-            <div className="w-2 h-2 rounded-full bg-red-400" />
-          </div>
-        )}
-      </div>
+      {/* Куда */}
+      <AddressInput
+        placeholder="Куда?"
+        icon={
+          <Navigation className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-red-400 pointer-events-none" />
+        }
+        dotColor="bg-red-400"
+        value={toAddress}
+        onChange={(val) => {
+          setToAddress(val);
+          if (!val) {
+            setToPlace(null);
+            onToCoords(null);
+          }
+        }}
+        onSelect={handleToSelect}
+        onClear={handleToClear}
+        disabled={isInTrip || isLoading}
+      />
 
-      {/* Error message */}
+      {/* Ошибка */}
       {error && (
-        <p className="text-xs text-red-400 px-1">{error}</p>
+        <p className="text-xs text-red-400 px-1" role="alert">{error}</p>
       )}
 
-      {/* Build route button */}
+      {/* Кнопка построения маршрута */}
       <Button
         onClick={handleBuildRoute}
         disabled={

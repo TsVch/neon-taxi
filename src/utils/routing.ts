@@ -8,38 +8,109 @@ import { cumulativeDistances } from "./haversine";
 const NOMINATIM_URL = "https://nominatim.openstreetmap.org/search";
 const OSRM_URL = "https://router.project-osrm.org/route/v1/driving";
 
+// Москва и ближайшее Подмосковье
+const MOSCOW_VIEWBOX = "37.0,55.3,38.2,56.2";
+
 /**
- * Geocode an address query using Nominatim (OpenStreetMap).
+ * Базовый геокодинг-запрос к Nominatim.
+ */
+async function nominatimSearch(params: {
+  query: string;
+  limit: number;
+  restricted: boolean;
+}): Promise<GeocodedPlace[]> {
+  const { query, limit, restricted } = params;
+
+  const url = new URL(NOMINATIM_URL);
+  url.searchParams.set("q", query);
+  url.searchParams.set("format", "json");
+  url.searchParams.set("limit", String(limit));
+  url.searchParams.set("countrycodes", "ru");
+
+  if (restricted) {
+    url.searchParams.set("viewbox", MOSCOW_VIEWBOX);
+    url.searchParams.set("bounded", "1");
+  }
+
+  const response = await fetch(url.toString(), {
+    headers: {
+      "Accept-Language": "ru,en",
+      "User-Agent": "NeonTaxi/1.0",
+    },
+  });
+
+  if (!response.ok) return [];
+
+  const data = await response.json();
+  if (!data || !Array.isArray(data)) return [];
+
+  return data.map(
+    (item: { lat: string; lon: string; display_name: string }): GeocodedPlace => ({
+      lat: parseFloat(item.lat),
+      lon: parseFloat(item.lon),
+      displayName: item.display_name,
+    }),
+  );
+}
+
+/**
+ * Подсказки адресов для автодополнения (autocomplete).
+ * Сначала ищет в Москве и области, при пустом результате — по всей России.
+ */
+export async function searchAddresses(
+  query: string,
+): Promise<GeocodedPlace[]> {
+  if (!query || query.trim().length < 2) return [];
+
+  try {
+    // Pass 1: Moscow area only
+    let results = await nominatimSearch({
+      query: query.trim(),
+      limit: 5,
+      restricted: true,
+    });
+
+    // Pass 2: если Москва ничего не дала — ищем по всей России
+    if (results.length === 0) {
+      results = await nominatimSearch({
+        query: query.trim(),
+        limit: 5,
+        restricted: false,
+      });
+    }
+
+    return results;
+  } catch (error) {
+    console.error("Autocomplete error:", error);
+    return [];
+  }
+}
+
+/**
+ * Геокодирование одного адреса через Nominatim (для финального подтверждения).
+ * Сначала ищет в Москве и области, при пустом результате — по всей России.
  */
 export async function geocodeAddress(
   query: string,
 ): Promise<GeocodedPlace | null> {
   try {
-    const url = new URL(NOMINATIM_URL);
-    url.searchParams.set("q", query);
-    url.searchParams.set("format", "json");
-    url.searchParams.set("limit", "1");
-
-    const response = await fetch(url.toString(), {
-      headers: {
-        "Accept-Language": "ru,en",
-        "User-Agent": "NeonTaxi/1.0",
-      },
+    // Pass 1: Moscow area only
+    let results = await nominatimSearch({
+      query: query.trim(),
+      limit: 1,
+      restricted: true,
     });
 
-    if (!response.ok) {
-      console.warn("Nominatim error:", response.status);
-      return null;
+    // Pass 2: если Москва ничего не дала — ищем по всей России
+    if (results.length === 0) {
+      results = await nominatimSearch({
+        query: query.trim(),
+        limit: 1,
+        restricted: false,
+      });
     }
 
-    const data = await response.json();
-    if (!data || data.length === 0) return null;
-
-    return {
-      lat: parseFloat(data[0].lat),
-      lon: parseFloat(data[0].lon),
-      displayName: data[0].display_name,
-    };
+    return results.length > 0 ? results[0] : null;
   } catch (error) {
     console.error("Geocoding error:", error);
     return null;
