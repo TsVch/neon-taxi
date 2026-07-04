@@ -52,6 +52,7 @@ export function useIMU(): UseIMUReturn {
       setSnapshot({
         heading: orientationRef.current,
         isMoving,
+        accelerationMagnitude: totalAccel,
       });
     },
     [],

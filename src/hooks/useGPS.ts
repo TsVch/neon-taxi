@@ -1,5 +1,5 @@
 // ============================================================================
-// Multi-tier GPS Hook with Dead Reckoning
+// Multi-tier GPS Hook with Dead Reckoning + IMU
 // ============================================================================
 
 import { useState, useRef, useCallback, useEffect } from "react";
@@ -9,9 +9,11 @@ import type {
   SmoothGpsState,
   DeadReckoningState,
   LogEvent,
+  IMUSnapshot,
 } from "@/types/taximeter";
 import { GPS_CONSTANTS } from "@/types/taximeter";
 import { haversineMeters } from "@/utils/haversine";
+import { useIMU } from "./useIMU";
 
 export interface UseGPSReturn {
   smoothState: SmoothGpsState | null;
@@ -27,6 +29,8 @@ export interface UseGPSReturn {
   totalDistanceM: number;
   isSimulating: boolean;
   setSimulating: (v: boolean) => void;
+  imuSupported: boolean;
+  imuActive: boolean;
 }
 
 let eventIdCounter = 0;
@@ -53,6 +57,9 @@ function createEvent(
 }
 
 export function useGPS(): UseGPSReturn {
+  // IMU (акселерометр + компас) для улучшенного Dead Reckoning
+  const imu = useIMU();
+
   const [smoothState, setSmoothState] = useState<SmoothGpsState | null>(null);
   const [deadReckoning, setDeadReckoning] = useState<DeadReckoningState>({
     active: false,
@@ -62,6 +69,9 @@ export function useGPS(): UseGPSReturn {
     estimatedLat: 0,
     estimatedLon: 0,
     heading: null,
+    imuHeading: null,
+    imuMoving: null,
+    imuSupported: false,
   });
   const [recentPoints, setRecentPoints] = useState<GpsPoint[]>([]);
   const [isWatching, setIsWatching] = useState(false);
@@ -89,8 +99,12 @@ export function useGPS(): UseGPSReturn {
     estimatedLat: 0,
     estimatedLon: 0,
     heading: null,
+    imuHeading: null,
+    imuMoving: null,
+    imuSupported: false,
   });
   const lastGpsTimeRef = useRef<number>(Date.now());
+  const imuSnapshotRef = useRef<IMUSnapshot | null>(null);
 
   const addEvent = useCallback(
     (type: LogEvent["type"], message: string, data?: Record<string, unknown>) => {
@@ -106,6 +120,11 @@ export function useGPS(): UseGPSReturn {
     setEvents([]);
   }, []);
 
+  // Синхронизируем IMU snapshot в ref для доступа из интервала DR
+  useEffect(() => {
+    imuSnapshotRef.current = imu.snapshot;
+  }, [imu.snapshot]);
+
   // Dead Reckoning timer — runs every 1 second when no GPS updates
   const startDRTimer = useCallback(() => {
     if (drTimerRef.current) return;
@@ -120,15 +139,47 @@ export function useGPS(): UseGPSReturn {
           GPS_CONSTANTS.DR_DECAY_FACTOR,
           1 - elapsedSinceLastGPS / 60,
         );
-        const drSpeed = smoothSpeedRef.current * decayFactor;
+
+        // Получаем последние данные с IMU
+        const imuSnap = imuSnapshotRef.current;
+        const imuHeading = imuSnap?.heading ?? null;
+        const imuMoving = imuSnap?.isMoving ?? null;
+        const imuAccel = imuSnap?.accelerationMagnitude ?? 0;
         const timeDelta = 1; // 1 second interval
 
-        // Estimate new position using last known heading or assumed forward
-        const heading = deadReckoningRef.current.heading ?? 0;
-        const headingRad = (heading * Math.PI) / 180;
-        const distanceDr = drSpeed * timeDelta;
+        // Определяем heading: IMU компас приоритетнее последнего GPS курса
+        const effectiveHeading = imuHeading ?? deadReckoningRef.current.heading ?? 0;
 
-        // Approximate lat/lon change
+        // Определяем скорость через IMU
+        let drSpeed: number;
+        let distanceDr: number;
+
+        if (imuMoving === false) {
+          // IMU говорит, что устройство НЕ ДВИЖЕТСЯ — дистанцию не накапливаем
+          drSpeed = 0;
+          distanceDr = 0;
+        } else {
+          // Устройство движется или IMU недоступен — оцениваем скорость
+          if (imuAccel > 0.8) {
+            // Активное ускорение — скорость растёт
+            drSpeed = Math.min(
+              smoothSpeedRef.current * (1 + imuAccel * 0.15),
+              GPS_CONSTANTS.MAX_SPEED_M_S,
+            );
+          } else if (imuAccel < 0.15) {
+            // Очень низкая вибрация — замедление, ускоренный спад
+            drSpeed = smoothSpeedRef.current * Math.max(decayFactor, 0.5);
+          } else {
+            // Нормальное движение — стандартный спад
+            drSpeed = smoothSpeedRef.current * Math.max(decayFactor, 0.7);
+          }
+
+          distanceDr = drSpeed * timeDelta;
+        }
+
+        // Estimate new position using effective heading
+        const headingRad = (effectiveHeading * Math.PI) / 180;
+
         const latDelta =
           (distanceDr * Math.cos(headingRad)) / 111320;
         const lonDelta =
@@ -145,13 +196,16 @@ export function useGPS(): UseGPSReturn {
           decayFactor,
           estimatedLat: estLat,
           estimatedLon: estLon,
-          heading: heading,
+          heading: effectiveHeading,
+          imuHeading,
+          imuMoving,
+          imuSupported: imu.isSupported,
         };
 
         deadReckoningRef.current = newDR;
         setDeadReckoning(newDR);
 
-        // Accumulate distance traveled during DR
+        // Accumulate distance traveled during DR (только если IMU подтверждает движение)
         if (distanceDr >= GPS_CONSTANTS.MIN_MOVEMENT_M) {
           totalDistRef.current += distanceDr;
           setTotalDistanceM(totalDistRef.current);
@@ -163,30 +217,40 @@ export function useGPS(): UseGPSReturn {
           lon: estLon,
           accuracy: 999,
           speed: drSpeed,
-          heading: heading,
+          heading: effectiveHeading,
           timestamp: now,
           quality: "dead_reck",
         };
         smoothStateRef.current = drState;
         setSmoothState(drState);
 
-        addEvent("dr", `DR активен: ${drSpeed.toFixed(1)} м/с, затухание ${decayFactor.toFixed(2)}`, {
+        const drMsg = imuMoving === false
+          ? `DR: СТОП (IMU: нет движения)`
+          : `DR: ${drSpeed.toFixed(1)} м/с, ${effectiveHeading.toFixed(0)}°${imuHeading !== null ? ' (IMU)' : ''}${imuAccel > 0.8 ? ' ускорение' : ''}`;
+        addEvent("dr", drMsg, {
           elapsedSinceLastGPS,
           drSpeed,
           decayFactor,
+          imuHeading,
+          imuMoving,
+          imuAccel,
         });
       } else {
-        // Not yet in DR mode, but update elapsed time
+        // Not yet in DR mode, but update elapsed time and IMU info
+        const imuSnap = imuSnapshotRef.current;
         const newDR: DeadReckoningState = {
           ...deadReckoningRef.current,
           elapsedSinceLastGPS,
           active: false,
+          imuHeading: imuSnap?.heading ?? null,
+          imuMoving: imuSnap?.isMoving ?? null,
+          imuSupported: imu.isSupported,
         };
         deadReckoningRef.current = newDR;
         setDeadReckoning(newDR);
       }
     }, 1000);
-  }, [addEvent]);
+  }, [addEvent, imu.isSupported]);
 
   const stopDRTimer = useCallback(() => {
     if (drTimerRef.current) {
@@ -470,6 +534,12 @@ export function useGPS(): UseGPSReturn {
       return;
     }
 
+    // Запускаем IMU (акселерометр + компас) для улучшения DR
+    if (imu.isSupported) {
+      imu.startListening();
+      addEvent("system", "IMU активирован (акселерометр + компас)");
+    }
+
     const watchId = navigator.geolocation.watchPosition(
       handlePosition,
       handleError,
@@ -484,7 +554,7 @@ export function useGPS(): UseGPSReturn {
     setIsWatching(true);
     addEvent("system", "GPS отслеживание запущено");
     startDRTimer();
-  }, [handlePosition, handleError, addEvent, startDRTimer]);
+  }, [handlePosition, handleError, addEvent, startDRTimer, imu]);
 
   // Stop watching GPS
   const stopWatching = useCallback(() => {
@@ -492,10 +562,16 @@ export function useGPS(): UseGPSReturn {
       navigator.geolocation.clearWatch(watchIdRef.current);
       watchIdRef.current = null;
     }
+
+    // Останавливаем IMU
+    if (imu.isSupported) {
+      imu.stopListening();
+    }
+
     setIsWatching(false);
     stopDRTimer();
     addEvent("system", "GPS отслеживание остановлено");
-  }, [addEvent, stopDRTimer]);
+  }, [addEvent, stopDRTimer, imu]);
 
   // Add simulated point
   const addSimulatedPoint = useCallback(
@@ -542,5 +618,7 @@ export function useGPS(): UseGPSReturn {
     totalDistanceM,
     isSimulating,
     setSimulating,
+    imuSupported: imu.isSupported,
+    imuActive: imu.snapshot !== null && imu.isSupported,
   };
 }

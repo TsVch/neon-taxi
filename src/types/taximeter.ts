@@ -45,6 +45,9 @@ export interface DeadReckoningState {
   estimatedLat: number;
   estimatedLon: number;
   heading: number | null;
+  imuHeading: number | null;
+  imuMoving: boolean | null;
+  imuSupported: boolean;
 }
 
 // ============================================================================
@@ -150,6 +153,7 @@ export interface LogEvent {
 export interface IMUSnapshot {
   heading: number | null;
   isMoving: boolean;
+  accelerationMagnitude: number;
 }
 
 // ============================================================================
