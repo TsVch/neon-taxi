@@ -11,6 +11,7 @@ export default defineConfig({
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },
+    dedupe: ['react', 'react-dom'],
   },
   build: {
     // Enable source maps for better debugging (disable in production if needed)
