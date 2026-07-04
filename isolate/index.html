@@ -1,20 +1,42 @@
 <!doctype html>
-<html lang="en">
+<html lang="ru">
 
 <head>
   <meta charset="UTF-8" />
   <link rel="icon" type="image/svg+xml" href="/logo.svg" />
   <link rel="manifest" href="/manifest.webmanifest" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+
+  <!-- Viewport для мобильных устройств с учётом safe areas (iPhone X+) -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, user-scalable=no" />
+
+  <!-- Цвет темы для браузера (Android Chrome, iOS Safari) -->
+  <meta name="theme-color" content="#0a0a1a" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Neon Taxi" />
+
+  <!-- Запрет автоматического определения телефонных номеров (мешает вводу адресов) -->
+  <meta name="format-detection" content="telephone=no" />
+
   <title>Neon Taxi</title>
-  <script type="module" crossorigin src="/assets/index-CEqTsCzs.js"></script>
+
+  <style>
+    /* Минимальные стили для предотвращения белого экрана при загрузке */
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: #0a0a1a;
+      overscroll-behavior: none;
+      -webkit-overflow-scrolling: touch;
+    }
+  </style>
+  <script type="module" crossorigin src="/assets/index-CvcFWmX8.js"></script>
   <link rel="modulepreload" crossorigin href="/assets/framer-motion-DfXMriiy.js">
   <link rel="modulepreload" crossorigin href="/assets/radix-ui-BpxAS7EU.js">
   <link rel="modulepreload" crossorigin href="/assets/charts-CZGE-i8s.js">
   <link rel="modulepreload" crossorigin href="/assets/react-vendor-DKIK6waW.js">
-  <link rel="stylesheet" crossorigin href="/assets/index-DXVA4Ifj.css">
+  <link rel="stylesheet" crossorigin href="/assets/index-BYot6q-Q.css">
 </head>
-
 
 <body>
   <div id="root"></div>
