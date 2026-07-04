@@ -285,14 +285,14 @@ export function useGPS(): UseGPSReturn {
 
       setRecentPoints((prev) => [...prev.slice(-99), gpsPoint]);
 
-      // Update last GPS time (resets DR timer)
-      lastGpsTimeRef.current = timestamp;
-
       if (quality === "dead_reck" && !isSim) {
-        // GPS rejected (>500m accuracy)
+        // GPS rejected (>500m accuracy) — НЕ сбрасываем DR таймер
         addEvent("gps", `GPS отклонён: точность ${accuracy.toFixed(0)}м`, { accuracy });
         return;
       }
+
+      // Update last GPS time (resets DR timer) — только для ПРИНЯТЫХ точек
+      lastGpsTimeRef.current = timestamp;
 
       // Jump Guard: detect speed jumps > 55 m/s
       if (
