@@ -1,0 +1,1 @@
+import{c as o}from"./index-BM8iAs8w.js";const c=[["path",{d:"M20 10c0 4.993-5.539 10.193-7.399 11.799a1 1 0 0 1-1.202 0C9.539 20.193 4 14.993 4 10a8 8 0 0 1 16 0",key:"1r0f0z"}],["circle",{cx:"12",cy:"10",r:"3",key:"ilqhr7"}]],i=o("map-pin",c);const n=[["polygon",{points:"3 11 22 2 13 21 11 13 3 11",key:"1ltx0t"}]],t=o("navigation",n);export{i as M,t as N};
