@@ -1,53 +1,56 @@
 // ============================================================================
-// Test Scenario — 35km имитация поездки с кейсами: пропажа GPS, отклонение
+// Test Scenario — 10 км имитация поездки, ~10 мин, 60 км/ч
 // ============================================================================
 //
-// Маршрут: Москва (Кремль → Ленинградский пр-т → МКАД → Алтуфьевское ш.)
-// Длина: ~35 км, время: ~50 мин при средней скорости 42 км/ч
+// Маршрут: Москва (Кремль → Кутузовский пр-т → Поклонная гора)
+// Длина: ~10 км, время: ~10 мин при средней скорости ~60 км/ч
 //
-// Сценарий по этапам:
-//   Этап 1 — нормальная поездка по МКАД (0-15 км)
-//   Этап 2 — ПРОПАЖА GPS (15-17 км) — проверка DR + IMU
-//   Этап 3 — восстановление GPS, норма (17-25 км)
-//   Этап 4 — ОТКЛОНЕНИЕ от маршрута (25-28 км) — проверка auto-replan
-//   Этап 5 — возврат на маршрут / финиш (28-35 км)
+// Этапы:
+//   0–2  км — нормальная поездка
+//   2–3  км — ⛔ ПРОПАЖА GPS  → Dead Reckoning + IMU
+//   3–5  км — норм. GPS
+//   5–6.5 км — 🚗 ОТКЛОНЕНИЕ от маршрута → snap-to-route, рост deviation
+//   6.5–7.5 — возврат на маршрут
+//   7.5–7.7 км — ✋ ОСТАНОВКА (светофор ~12 с)
+//   7.7–10 км — финиш
 // ============================================================================
 
-import { haversineMeters, pathDistanceMeters } from "./haversine";
+import { haversineMeters } from "./haversine";
+import type { PlannedRoute } from "@/types/taximeter";
 
 // ---------------------------------------------------------------------------
-// Типы сценария
+// Типы
 // ---------------------------------------------------------------------------
 
 export type ScenarioEventType =
-  | "gps_loss"       // GPS сигнал пропадает на N секунд
-  | "gps_restore"    // GPS сигнал восстанавливается
-  | "route_deviation"// координаты уходят от основного маршрута
-  | "route_return"   // координаты возвращаются на маршрут
-  | "traffic_stop"   // остановка на N секунд (светофор/пробка)
-  | "speed_bump"     // изменение скорости;
+  | "gps_loss"
+  | "gps_restore"
+  | "route_deviation"
+  | "route_return"
+  | "traffic_stop";
 
 export interface ScenarioEvent {
   type: ScenarioEventType;
-  triggerKm: number;   // срабатывает на этом километре пути
-  durationKm?: number; // длительность события в километрах
+  triggerKm: number;
+  durationKm?: number;
   params?: Record<string, number>;
 }
 
 export interface ScenarioDef {
   name: string;
   description: string;
-  route: Array<[number, number]>;   // [lat, lon]
-  deviationRoute?: Array<[number, number]>; // ответвление для теста отклонения
+  route: Array<[number, number]>;
+  deviationRoute?: Array<[number, number]>;
   events: ScenarioEvent[];
   defaultSpeedKmh: number;
+  fromLabel: string;
+  toLabel: string;
 }
 
 // ---------------------------------------------------------------------------
 // Вспомогательные функции
 // ---------------------------------------------------------------------------
 
-/** Линейная интерполяция между двумя точками */
 function lerp(
   a: [number, number],
   b: [number, number],
@@ -56,20 +59,17 @@ function lerp(
   return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
 }
 
-/** "Уплотняет" массив точек, добавляя промежуточные (каждые ~100м) */
+/** Уплотнение точек (каждые ~100м) */
 function densifyRoute(
   waypoints: Array<[number, number]>,
   maxStepM = 100,
 ): Array<[number, number]> {
   if (waypoints.length < 2) return waypoints;
-
   const result: Array<[number, number]> = [waypoints[0]];
-
   for (let i = 1; i < waypoints.length; i++) {
     const from = waypoints[i - 1];
     const to = waypoints[i];
     const segDist = haversineMeters(from[0], from[1], to[0], to[1]);
-
     if (segDist <= maxStepM) {
       result.push(to);
     } else {
@@ -82,7 +82,6 @@ function densifyRoute(
   return result;
 }
 
-/** Вычисляет кумулятивные расстояния от старта */
 function cumulativeMeters(
   coords: Array<[number, number]>,
 ): number[] {
@@ -96,154 +95,129 @@ function cumulativeMeters(
   return cum;
 }
 
+/**
+ * Преобразует маршрут сценария в PlannedRoute для отображения на карте.
+ */
+export function scenarioToPlannedRoute(
+  coords: Array<[number, number]>,
+): PlannedRoute {
+  const cumulativeM = cumulativeMeters(coords);
+  const totalDistanceM = cumulativeM[cumulativeM.length - 1] || 0;
+  // ~60 км/ч = 16.67 м/с
+  const avgSpeedMs = 16.67;
+  return {
+    coords,
+    cumulativeM,
+    totalDistanceM,
+    totalDurationS: Math.round(totalDistanceM / avgSpeedMs),
+  };
+}
+
 // ---------------------------------------------------------------------------
-// Точки маршрута (основные — разреженные, будут уплотнены)
+// Точки маршрута (~10 км): Кремль → Кутузовский пр-т → Поклонная гора
 // ---------------------------------------------------------------------------
-//
-// Маршрут: Москва центр → Ленинградский пр-т → МКАД → Алтуфьевское ш.
-// Ориентир — реальные координаты перекрёстков с карты.
-//
+
 const MAIN_WAYPOINTS: Array<[number, number]> = [
-  // 0-2 км: центр
-  [55.7558, 37.6173],  // Красная площадь (старт)
-  [55.7650, 37.6060],  // Тверская ул., Манежная пл.
-  [55.7750, 37.5900],  // Триумфальная пл.
+  // 0.0–0.8 км: Кремль → Боровицкая пл.
+  [55.7537, 37.6208],  // Красная площадь (старт)
+  [55.7525, 37.6170],  // Собор Василия Блаженного
+  [55.7512, 37.6130],  // Боровицкая площадь
 
-  // 2-6 км: Ленинградский пр-т (начало)
-  [55.7830, 37.5770],  // Белорусский вокзал
-  [55.7900, 37.5600],  // ул. Горького
-  [55.8000, 37.5450],  // Динамо
-  [55.8090, 37.5320],  // Петровский парк
+  // 0.8–2.0 км: Воздвиженка → Новый Арбат
+  [55.7505, 37.6070],  // ул. Воздвиженка
+  [55.7495, 37.6000],  // Новый Арбат, начало
+  [55.7485, 37.5920],  // Новый Арбат, д. 21
+  [55.7475, 37.5840],  // Новый Арбат, д. 15
+  [55.7465, 37.5760],  // Новый Арбат, д. 11
 
-  // 6-12 км: Ленинградский пр-т (середина)
-  [55.8200, 37.5180],  // Сокол (ст. метро)
-  [55.8300, 37.5050],  // Аэропорт
-  [55.8400, 37.4950],  // Гражданская
-  [55.8480, 37.4860],  // Войковская
+  // 2.0–4.5 км: Кутузовский пр-т (начало)
+  [55.7455, 37.5680],  // Кутузовский пр-т, начало
+  [55.7445, 37.5600],  // Кутузовский пр-т, д. 7
+  [55.7432, 37.5500],  // Украинский бульвар
+  [55.7420, 37.5400],  // Кутузовский пр-т, д. 18
+  [55.7410, 37.5300],  // Кутузовский пр-т, д. 24
+  [55.7400, 37.5200],  // Кутузовский пр-т, д. 30
+  [55.7390, 37.5100],  // Триумфальная арка
 
-  // 12-15 км: Ленинградское шоссе → МКАД
-  [55.8600, 37.4750],  // Михалково
-  [55.8730, 37.4650],  // Головинский р-н
-  [55.8850, 37.4600],  // Левобережный
-  [55.8950, 37.4550],  // Химки
+  // 4.5–7.0 км: Кутузовский пр-т (середина)
+  [55.7380, 37.5000],  // Кутузовский пр-т, д. 36
+  [55.7370, 37.4900],  // Парк Победы (начало)
+  [55.7360, 37.4820],  // Кутузовский пр-т, д. 43
+  [55.7350, 37.4740],  // Минская ул.
+  [55.7340, 37.4660],  // Кутузовский пр-т, д. 48
 
-  // 15-18 км: МКАД (северо-запад)
-  [55.9050, 37.4650],  // Выезд на МКАД (внешнее кольцо)
-  [55.9120, 37.4850],  // МКАД, 75-й км
-  [55.9180, 37.5050],  // МКАД, поворот на Дмитровку
+  // 7.0–10.0 км: Поклонная гора
+  [55.7330, 37.4580],  // Славянский бульвар
+  [55.7320, 37.4500],  // Кутузовский пр-т, д. 55
+  [55.7310, 37.4420],  // Поклонная ул.
+  [55.7302, 37.4340],  // ул. Генерала Ермолова
+  [55.7295, 37.4260],  // Можайский вал
+  [55.7290, 37.4180],  // Кутузовский пр-т, конец
+  [55.7285, 37.4100],  // Рябиновая ул.
+  [55.7280, 37.4020],  // Бизнес-парк
 
-  // 18-22 км: МКАД (север)
-  [55.9220, 37.5300],  // МКАД, Дмитровское ш.
-  [55.9260, 37.5580],  // МКАД, 76-й км
-  [55.9280, 37.5850],  // МКАД, Алтуфьевское ш. (север)
-
-  // 22-28 км: МКАД (северо-восток)
-  [55.9300, 37.6150],  // МКАД, Лианозово
-  [55.9300, 37.6450],  // МКАД, 79-й км
-  [55.9280, 37.6750],  // МКАД, Ярославское ш.
-  [55.9250, 37.7050],  // МКАД, Северянин
-  [55.9200, 37.7350],  // МКАД, 85-й км
-
-  // 28-33 км: МКАД → съезд на Щёлковское ш.
-  [55.9150, 37.7650],  // МКАД, Щёлковское ш.
-  [55.9100, 37.7900],  // МКАД, 90-й км
-  [55.9050, 37.8150],  // МКАД, Ивановское
-  [55.8980, 37.8400],  // МКАД, Носовиха
-
-  // 33-35 км: финиш
-  [55.8920, 37.8600],  // МКАД 95-й км
-  [55.8860, 37.8780],  // поворот в Кожухово
-  [55.8800, 37.8900],  // Конечная точка
+  // 10 км — финиш
+  [55.7275, 37.3940],  // Поклонная гора (финиш)
+  [55.7272, 37.3900],
 ];
 
-// Ответвление для теста отклонения от маршрута
+// Ответвление: съезд с Кутузовского на Минскую ул., затем возврат
 const DEVIATION_WAYPOINTS: Array<[number, number]> = [
-  [55.9050, 37.4650],  // Точка съезда (та же, что 15-й км основного маршрута)
-  [55.9000, 37.4700],  // Съезд с МКАД на местную дорогу
-  [55.8950, 37.4750],  // Уход в сторону (параллельно МКАД, но не по нему)
-  [55.8900, 37.4800],  // Отклонение ~300м от МКАД
-  [55.8850, 37.4850],  // Продолжение движения вне маршрута
-  [55.8800, 37.4900],  // Максимальное отклонение ~400м
-  [55.8780, 37.4950],  // Начало возврата
-  [55.8820, 37.5000],  // Возврат ближе к МКАД
-  [55.8900, 37.5050],  // Выезд обратно на МКАД
+  [55.7350, 37.4740],  // Точка съезда (Кутузовский / Минская)
+  [55.7330, 37.4730],  // Съезд на Минскую ул.
+  [55.7315, 37.4720],  // Уход в сторону (отклонение ~200м)
+  [55.7300, 37.4710],  // Параллельная улица
+  [55.7285, 37.4700],  // Максимальное отклонение ~350м
+  [55.7290, 37.4680],  // Начало возврата
+  [55.7310, 37.4670],  // Возврат ближе к маршруту
+  [55.7330, 37.4660],  // Выезд обратно на Кутузовский
 ];
 
 // ---------------------------------------------------------------------------
-// Сценарий
+// Сценарий 10 км
 // ---------------------------------------------------------------------------
 
 export const TEST_SCENARIO: ScenarioDef = {
-  name: "Москва → МКАД, 35 км",
+  name: "Кремль → Поклонная гора, 10 км",
   description:
-    "Полная имитация поездки: 35 км, ~50 мин. " +
-    "Этап 1: норм. GPS · " +
-    "Этап 2: пропажа GPS (DR) · " +
-    "Этап 3: норм. GPS · " +
-    "Этап 4: отклонение от маршрута · " +
-    "Этап 5: возврат и финиш.",
-  route: densifyRoute(MAIN_WAYPOINTS, 100),
+    "~10 мин, все кейсы: " +
+    "норм.GPS → ⛔пропажа GPS(DR) → " +
+    "норм.GPS → 🚗отклонение от маршрута → " +
+    "✋остановка → финиш",
+  route: densifyRoute(MAIN_WAYPOINTS, 80),
   deviationRoute: densifyRoute(DEVIATION_WAYPOINTS, 50),
-  defaultSpeedKmh: 42,
+  defaultSpeedKmh: 60,
+  fromLabel: "Красная площадь",
+  toLabel: "Поклонная гора",
   events: [
-    // ЭТАП 1 (0-15 км): нормальная поездка, 42 км/ч
-    // ЭТАП 2 (15-17 км): пропажа GPS (2 км без сигнала)
-    {
-      type: "gps_loss",
-      triggerKm: 15.0,
-      durationKm: 2.0,
-      params: { accuracy: 999 },
-    },
-    {
-      type: "gps_restore",
-      triggerKm: 17.0,
-      params: { accuracy: 15 },
-    },
-    // ЭТАП 3 (17-25 км): нормальная поездка
-    // ЭТАП 4 (25-27 км): отклонение от маршрута
-    {
-      type: "route_deviation",
-      triggerKm: 25.0,
-      durationKm: 2.5,
-    },
-    {
-      type: "route_return",
-      triggerKm: 27.5,
-    },
-    // ЭТАП 5 (27-35 км): норма до финиша
-    // Короткая остановка на светофоре (на 30-м км)
-    {
-      type: "traffic_stop",
-      triggerKm: 30.0,
-      durationKm: 0.15, // ~150 метров (около 10 сек при 50 км/ч)
-    },
+    // ЭТАП 1 (0–2 км): нормальная поездка
+    // ЭТАП 2 (2–3 км): пропажа GPS
+    { type: "gps_loss", triggerKm: 2.0, durationKm: 1.0, params: { accuracy: 999 } },
+    { type: "gps_restore", triggerKm: 3.0, params: { accuracy: 15 } },
+    // ЭТАП 3 (3–5 км): норма
+    // ЭТАП 4 (5–6.5 км): отклонение
+    { type: "route_deviation", triggerKm: 5.0, durationKm: 1.5 },
+    { type: "route_return", triggerKm: 6.5 },
+    // ЭТАП 5 (7.5–7.7 км): остановка
+    { type: "traffic_stop", triggerKm: 7.5, durationKm: 0.2 },
+    // ЭТАП 6 (7.7–10 км): финиш
   ],
 };
 
 // ---------------------------------------------------------------------------
-// ScenarioRunner — управляет состоянием сценария в реальном времени
+// ScenarioRunner
 // ---------------------------------------------------------------------------
 
 export interface RunnerState {
-  /** Индекс текущей точки в основном маршруте */
   routeIndex: number;
-  /** Текущая точка [lat, lon] */
   currentPoint: [number, number];
-  /** Актуальная скорость в м/с */
   currentSpeedMs: number;
-  /** Точность GPS: 10 = good, 999 = dead_reck */
   currentAccuracy: number;
-  /** Активно ли отклонение от маршрута */
   isDeviated: boolean;
-  /** Индекс в deviationRoute (если активно) */
   deviationIndex: number;
-  /** Пройденная дистанция в метрах */
   distanceM: number;
-  /** Сколько % маршрута пройдено (0-1) */
   progress: number;
-  /** Активна ли остановка */
   isStopped: boolean;
-  /** Флаги событий для логирования (сбрасываются после каждого шага) */
   eventFlags: {
     gpsLost: boolean;
     gpsRestored: boolean;
@@ -257,19 +231,32 @@ export interface RunnerState {
 export class ScenarioRunner {
   private scenario: ScenarioDef;
   private cumulative: number[];
-  private deviationCumulative: number[] = [];
   private totalDistM: number;
-  private stepMeters = 25;
   private state: RunnerState;
 
   constructor(scenario: ScenarioDef = TEST_SCENARIO) {
     this.scenario = scenario;
     this.cumulative = cumulativeMeters(scenario.route);
     this.totalDistM = this.cumulative[this.cumulative.length - 1] || 1;
-    if (scenario.deviationRoute && scenario.deviationRoute.length > 1) {
-      this.deviationCumulative = cumulativeMeters(scenario.deviationRoute);
-    }
     this.state = this.initialState();
+  }
+
+  get startPoint(): [number, number] | null {
+    const r = this.scenario.route;
+    return r.length > 0 ? r[0] : null;
+  }
+
+  get endPoint(): [number, number] | null {
+    const r = this.scenario.route;
+    return r.length > 0 ? r[r.length - 1] : null;
+  }
+
+  get plannedRoute(): PlannedRoute {
+    return scenarioToPlannedRoute(this.scenario.route);
+  }
+
+  get deviationRoute(): Array<[number, number]> | undefined {
+    return this.scenario.deviationRoute;
   }
 
   private initialState(): RunnerState {
@@ -295,63 +282,48 @@ export class ScenarioRunner {
     };
   }
 
-  /** Сброс сценария в начальное состояние */
   reset(): void {
     this.state = this.initialState();
   }
 
-  /** Получить копию текущего состояния (для сравнения на изменения) */
   getState(): RunnerState {
-    return {
-      ...this.state,
-      currentPoint: [...this.state.currentPoint],
-    };
+    return { ...this.state, currentPoint: [...this.state.currentPoint] };
   }
 
-  /** Шаг сценария: перемещение на шаг вперёд */
   advance(distDeltaM: number): void {
     const s = this.state;
     if (s.routeIndex >= this.scenario.route.length - 1) return;
 
-    // Сбрасываем флаги событий
     s.eventFlags = {
-      gpsLost: false,
-      gpsRestored: false,
-      deviationStarted: false,
-      deviationEnded: false,
-      stopStarted: false,
-      stopEnded: false,
+      gpsLost: false, gpsRestored: false,
+      deviationStarted: false, deviationEnded: false,
+      stopStarted: false, stopEnded: false,
     };
 
     s.distanceM += distDeltaM;
     const km = s.distanceM / 1000;
     s.progress = Math.min(1, s.distanceM / this.totalDistM);
 
-    // Проверяем активные события
     this.processEvents(km);
 
-    // Если активна остановка — не двигаемся (distanceM уже увеличена, km растёт)
     if (s.isStopped) {
       s.currentSpeedMs = 0;
       return;
     }
 
-    // Если активно отклонение — движемся по deviationRoute
     if (s.isDeviated && this.scenario.deviationRoute) {
-      this.advanceOnDeviationRoute(distDeltaM);
+      this.advanceOnDeviation(distDeltaM);
       return;
     }
 
-    // Основной маршрут
-    this.advanceOnMainRoute(distDeltaM);
+    this.advanceOnMain(distDeltaM);
   }
 
-  private advanceOnMainRoute(distDeltaM: number): void {
+  private advanceOnMain(distDeltaM: number): void {
     const s = this.state;
     const route = this.scenario.route;
     if (s.routeIndex >= route.length - 1) return;
 
-    // Считаем, сколько метров нужно пройти по маршруту
     let remaining = distDeltaM;
     while (remaining > 0 && s.routeIndex < route.length - 1) {
       const from = route[s.routeIndex];
@@ -361,9 +333,7 @@ export class ScenarioRunner {
       if (segDist <= remaining) {
         remaining -= segDist;
         s.routeIndex++;
-        if (s.routeIndex < route.length) {
-          s.currentPoint = [...route[s.routeIndex]] as [number, number];
-        }
+        s.currentPoint = [...route[s.routeIndex]] as [number, number];
       } else {
         const t = remaining / segDist;
         s.currentPoint = [
@@ -373,12 +343,10 @@ export class ScenarioRunner {
         remaining = 0;
       }
     }
-
-    // Скорость = пройденная дистанция за шаг
-    s.currentSpeedMs = Math.max(1, distDeltaM); // минимум 1 м/с
+    s.currentSpeedMs = Math.max(1, distDeltaM);
   }
 
-  private advanceOnDeviationRoute(distDeltaM: number): void {
+  private advanceOnDeviation(distDeltaM: number): void {
     const s = this.state;
     const devRoute = this.scenario.deviationRoute!;
     if (s.deviationIndex >= devRoute.length - 1) return;
@@ -388,13 +356,10 @@ export class ScenarioRunner {
       const from = devRoute[s.deviationIndex];
       const to = devRoute[s.deviationIndex + 1];
       const segDist = haversineMeters(from[0], from[1], to[0], to[1]);
-
       if (segDist <= remaining) {
         remaining -= segDist;
         s.deviationIndex++;
-        if (s.deviationIndex < devRoute.length) {
-          s.currentPoint = [...devRoute[s.deviationIndex]] as [number, number];
-        }
+        s.currentPoint = [...devRoute[s.deviationIndex]] as [number, number];
       } else {
         const t = remaining / segDist;
         s.currentPoint = [
@@ -405,82 +370,59 @@ export class ScenarioRunner {
       }
     }
 
-    // Когда отклонение закончилось — возвращаемся на основной маршрут
     if (s.deviationIndex >= devRoute.length - 1) {
       s.isDeviated = false;
-      // Находим ближайшую точку на основном маршруте
-      this.snapBackToMainRoute();
+      this.snapBack();
     }
   }
 
-  private snapBackToMainRoute(): void {
+  private snapBack(): void {
     const s = this.state;
     const route = this.scenario.route;
     let bestIdx = s.routeIndex;
     let bestDist = Infinity;
-
-    // Ищем ближайшую точку на основном маршруте
     for (let i = s.routeIndex; i < route.length; i++) {
-      const d = haversineMeters(
-        s.currentPoint[0], s.currentPoint[1],
-        route[i][0], route[i][1],
-      );
-      if (d < bestDist) {
-        bestDist = d;
-        bestIdx = i;
-      }
+      const d = haversineMeters(s.currentPoint[0], s.currentPoint[1], route[i][0], route[i][1]);
+      if (d < bestDist) { bestDist = d; bestIdx = i; }
     }
-
     s.routeIndex = Math.min(bestIdx, route.length - 1);
     s.currentPoint = [...route[s.routeIndex]] as [number, number];
   }
 
   private processEvents(km: number): void {
     const s = this.state;
-
     for (const event of this.scenario.events) {
-      const triggerKm = event.triggerKm;
-
+      const t = event.triggerKm;
       switch (event.type) {
         case "gps_loss":
-          if (km >= triggerKm && km < triggerKm + (event.durationKm ?? 2)) {
+          if (km >= t && km < t + (event.durationKm ?? 1)) {
             s.currentAccuracy = 999;
             s.eventFlags.gpsLost = true;
           }
           break;
-
         case "gps_restore":
-          if (km >= triggerKm && s.currentAccuracy > 500) {
+          if (km >= t && s.currentAccuracy > 500) {
             s.currentAccuracy = event.params?.accuracy ?? 10;
             s.eventFlags.gpsRestored = true;
           }
           break;
-
         case "route_deviation":
-          if (
-            km >= triggerKm &&
-            km < triggerKm + (event.durationKm ?? 2) &&
-            !s.isDeviated &&
-            this.scenario.deviationRoute
-          ) {
+          if (km >= t && km < t + (event.durationKm ?? 1) && !s.isDeviated && this.scenario.deviationRoute) {
             s.isDeviated = true;
             s.deviationIndex = 0;
             s.eventFlags.deviationStarted = true;
           }
           break;
-
         case "route_return":
-          if (km >= triggerKm && s.isDeviated) {
+          if (km >= t && s.isDeviated) {
             s.isDeviated = false;
-            this.snapBackToMainRoute();
+            this.snapBack();
             s.eventFlags.deviationEnded = true;
           }
           break;
-
         case "traffic_stop": {
-          const stopEndKm = triggerKm + (event.durationKm ?? 0.15);
-          // distanceM уже увеличена до начала processEvents, km растёт
-          if (km >= triggerKm && km < stopEndKm) {
+          const stopEndKm = t + (event.durationKm ?? 0.15);
+          if (km >= t && km < stopEndKm) {
             s.isStopped = true;
             s.eventFlags.stopStarted = true;
           } else if (km >= stopEndKm) {

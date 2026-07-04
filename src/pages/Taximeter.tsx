@@ -19,7 +19,7 @@ import { computeKtod } from "@/utils/ktod";
 import { snapToRoute, shouldRecalculateRoute } from "@/utils/routeSnap";
 import { getRoute } from "@/utils/routing";
 import { haversineMeters } from "@/utils/haversine";
-import { TEST_SCENARIO } from "@/utils/testScenario";
+import { TEST_SCENARIO, scenarioToPlannedRoute } from "@/utils/testScenario";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -310,6 +310,7 @@ export default function Taximeter() {
   // Start trip
   const handleStartTrip = useCallback(() => {
     const now = Date.now();
+    const isScenarioMode = sim.isScenarioMode && sim.scenario;
 
     // Запрашиваем блокировку экрана
     requestWakeLock();
@@ -322,6 +323,23 @@ export default function Taximeter() {
     // Start simulator if in sim mode
     if (isSimulating) {
       sim.start(addSimulatedPoint);
+    }
+
+    // В режиме сценария: авто-настройка маршрута для отображения на карте
+    if (isScenarioMode && sim.scenario) {
+      const planned = scenarioToPlannedRoute(sim.scenario.route);
+      const routeCoords = planned.coords;
+      if (routeCoords.length > 0) {
+        const start = routeCoords[0];
+        const end = routeCoords[routeCoords.length - 1];
+
+        setRoute(planned);
+        setFromCoords(start);
+        setToCoords(end);
+        setFromPlace({ lat: start[0], lon: start[1], displayName: sim.scenario.fromLabel });
+        setToPlace({ lat: end[0], lon: end[1], displayName: sim.scenario.toLabel });
+        addEvent("system", `Маршрут: ${sim.scenario.fromLabel} → ${sim.scenario.toLabel} (${(planned.totalDistanceM / 1000).toFixed(1)} км)`);
+      }
     }
 
     setStatus("in_progress");
@@ -644,8 +662,8 @@ export default function Taximeter() {
                   </Badge>
                 </div>
                 <p className="text-[10px] text-white/30 mb-3 leading-relaxed">
-                  {sim.isScenarioMode
-                    ? "35 км: GPS loss, отклонение, остановка. Нажмите «Начать поездку»"
+                  {sim.isScenarioMode && sim.scenario
+                    ? `${sim.scenario.description}. Нажмите «Начать поездку»`
                     : "Включите для имитации длительной поездки с нештатными ситуациями"}
                 </p>
                 <div className="flex gap-2">
