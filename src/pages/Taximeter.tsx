@@ -19,6 +19,7 @@ import { computeKtod } from "@/utils/ktod";
 import { snapToRoute, shouldRecalculateRoute } from "@/utils/routeSnap";
 import { getRoute } from "@/utils/routing";
 import { haversineMeters } from "@/utils/haversine";
+import { TEST_SCENARIO } from "@/utils/testScenario";
 
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -76,6 +77,7 @@ export default function Taximeter() {
 
   // Simulator
   const sim = useSimulator();
+  const [showScenarioPicker, setShowScenarioPicker] = useState(false);
 
   // State
   const [status, setStatus] = useState<"ready" | "in_progress" | "completed">("ready");
@@ -484,6 +486,71 @@ export default function Taximeter() {
         </div>
       </header>
 
+      {/* Scenario Picker Modal */}
+      {showScenarioPicker && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm" onClick={() => setShowScenarioPicker(false)}>
+          <div
+            className="bg-gradient-to-b from-slate-900 to-slate-950 border border-white/10 rounded-2xl p-6 max-w-md mx-4 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 className="text-lg font-bold text-white mb-2">🧪 Тестовый сценарий</h3>
+            <p className="text-sm text-white/50 mb-4">
+              Запустить полную имитацию поездки с пропажей GPS, отклонением от
+              маршрута и остановками. После запуска нажмите «Начать поездку».
+            </p>
+            <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/5 p-4 mb-4">
+              <div className="text-sm font-semibold text-cyan-400 mb-1">
+                {TEST_SCENARIO.name}
+              </div>
+              <div className="text-xs text-white/40 leading-relaxed">
+                {TEST_SCENARIO.description}
+              </div>
+              <div className="mt-3 flex flex-wrap gap-2">
+                <span className="text-[10px] px-2 py-1 rounded-full bg-green-500/10 text-green-400 border border-green-500/30">
+                  🛰 GPS норм
+                </span>
+                <span className="text-[10px] px-2 py-1 rounded-full bg-red-500/10 text-red-400 border border-red-500/30">
+                  ⛔ GPS loss
+                </span>
+                <span className="text-[10px] px-2 py-1 rounded-full bg-orange-500/10 text-orange-400 border border-orange-500/30">
+                  🚗 Отклонение
+                </span>
+                <span className="text-[10px] px-2 py-1 rounded-full bg-yellow-500/10 text-yellow-400 border border-yellow-500/30">
+                  ✋ Остановка
+                </span>
+              </div>
+            </div>
+            <div className="flex gap-3">
+              <Button
+                variant="outline"
+                className="flex-1 border-white/10 text-white/60"
+                onClick={() => {
+                  sim.setScenario(null);
+                  setShowScenarioPicker(false);
+                  addEvent("system", "Сценарий отключён, стандартный симулятор");
+                }}
+              >
+                Отмена
+              </Button>
+              <Button
+                className="flex-1 bg-gradient-to-r from-cyan-500 to-blue-600 text-white"
+                onClick={() => {
+                  sim.setScenario(TEST_SCENARIO);
+                  setShowScenarioPicker(false);
+                  addEvent(
+                    "system",
+                    `Сценарий активирован: ${TEST_SCENARIO.name}, ` +
+                      `${(TEST_SCENARIO.route.length / 10).toFixed(0)} точек`,
+                  );
+                }}
+              >
+                Запустить сценарий
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <main className="max-w-6xl mx-auto px-4 py-6">
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Left panel — controls */}
@@ -557,6 +624,56 @@ export default function Taximeter() {
                 />
               </Suspense>
             </div>
+
+            {/* Scenario selector */}
+            {isSimulating && status === "ready" && (
+              <div className="rounded-xl border border-cyan-500/20 bg-cyan-500/5 backdrop-blur-sm p-4">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-[11px] font-semibold text-cyan-400 uppercase tracking-wider">
+                    Тестовый сценарий
+                  </span>
+                  <Badge
+                    variant="outline"
+                    className={`text-[10px] px-2 ${
+                      sim.isScenarioMode
+                        ? "border-cyan-500/50 text-cyan-400 bg-cyan-500/10"
+                        : "border-white/10 text-white/30"
+                    }`}
+                  >
+                    {sim.isScenarioMode ? "Активен" : "Выкл"}
+                  </Badge>
+                </div>
+                <p className="text-[10px] text-white/30 mb-3 leading-relaxed">
+                  {sim.isScenarioMode
+                    ? "35 км: GPS loss, отклонение, остановка. Нажмите «Начать поездку»"
+                    : "Включите для имитации длительной поездки с нештатными ситуациями"}
+                </p>
+                <div className="flex gap-2">
+                  {!sim.isScenarioMode ? (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="flex-1 text-[11px] h-8 border-cyan-500/30 text-cyan-400 hover:bg-cyan-500/10"
+                      onClick={() => setShowScenarioPicker(true)}
+                    >
+                      Выбрать сценарий
+                    </Button>
+                  ) : (
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="flex-1 text-[11px] h-8 border-red-500/30 text-red-400 hover:bg-red-500/10"
+                      onClick={() => {
+                        sim.setScenario(null);
+                        addEvent("system", "Сценарий отключён");
+                      }}
+                    >
+                      Отключить сценарий
+                    </Button>
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Tariff Selector */}
             <div className="rounded-xl border border-white/10 bg-black/40 backdrop-blur-sm p-4">

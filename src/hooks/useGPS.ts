@@ -589,11 +589,15 @@ export function useGPS(): UseGPSReturn {
     addEvent("system", "GPS отслеживание остановлено");
   }, [addEvent, stopDRTimer, imu]);
 
-  // Add simulated point
+  // Add simulated point (с поддержкой точности от сценария)
   const addSimulatedPoint = useCallback(
-    (lat: number, lon: number, speed: number) => {
+    (lat: number, lon: number, speed: number, accuracy?: number) => {
       const now = Date.now();
-      processPosition(lat, lon, 10 + Math.random() * 10, speed, null, now, true);
+      const acc = accuracy ?? 10 + Math.random() * 10;
+      // Если accuracy > 500 — симулируем потерю GPS: не отмечаем как isSim,
+      // чтобы processPosition сам классифицировал как dead_reck и запустил DR
+      const isRealGpsLoss = acc > GPS_CONSTANTS.POOR_THRESHOLD;
+      processPosition(lat, lon, acc, speed, null, now, !isRealGpsLoss);
     },
     [processPosition],
   );
