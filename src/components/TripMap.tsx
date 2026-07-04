@@ -47,6 +47,27 @@ interface TripMapProps {
   toCoords: [number, number] | null;
 }
 
+// Fix mobile touch: отключаем drag на тач-устройствах для удобного скролла страницы
+// Карта авто-позиционируется через MapBoundsUpdater — drag не обязателен
+function MobileTouchFix() {
+  const map = useMap();
+
+  useEffect(() => {
+    // На тач-устройствах отключаем drag карты, чтобы свайпы скроллили страницу
+    map.dragging.disable();
+
+    // Разрешаем pinch-to-zoom (остаётся активным по умолчанию)
+    // Разрешаем zoom через кнопки
+
+    return () => {
+      // Восстанавливаем при размонтировании
+      map.dragging.enable();
+    };
+  }, [map]);
+
+  return null;
+}
+
 // Remove "Leaflet" prefix from the attribution control
 function AttributionCleaner() {
   const map = useMap();
@@ -190,6 +211,7 @@ export default function TripMap({
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
 
+        <MobileTouchFix />
         <AttributionCleaner />
         <MapBoundsUpdater route={route} fromCoords={fromCoords} toCoords={toCoords} />
 

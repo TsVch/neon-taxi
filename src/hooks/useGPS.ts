@@ -31,6 +31,7 @@ export interface UseGPSReturn {
   setSimulating: (v: boolean) => void;
   imuSupported: boolean;
   imuActive: boolean;
+  imuPermissionGranted: boolean;
 }
 
 let eventIdCounter = 0;
@@ -534,10 +535,25 @@ export function useGPS(): UseGPSReturn {
       return;
     }
 
-    // Запускаем IMU (акселерометр + компас) для улучшения DR
-    if (imu.isSupported) {
-      imu.startListening();
-      addEvent("system", "IMU активирован (акселерометр + компас)");
+    // Запрашиваем разрешение на IMU (iOS требует явного согласия)
+    const startImu = () => {
+      if (imu.isSupported) {
+        imu.startListening();
+        addEvent("system", "IMU активирован (акселерометр + компас)");
+      }
+    };
+
+    if (imu.isSupported && !imu.permissionGranted) {
+      imu.requestPermission().then((granted) => {
+        if (granted) {
+          startImu();
+          addEvent("system", "Разрешение IMU получено");
+        } else {
+          addEvent("warn", "IMU недоступен: разрешение не получено");
+        }
+      });
+    } else if (imu.isSupported) {
+      startImu();
     }
 
     const watchId = navigator.geolocation.watchPosition(
@@ -620,5 +636,6 @@ export function useGPS(): UseGPSReturn {
     setSimulating,
     imuSupported: imu.isSupported,
     imuActive: imu.snapshot !== null && imu.isSupported,
+    imuPermissionGranted: imu.permissionGranted,
   };
 }

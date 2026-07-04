@@ -1,5 +1,5 @@
 // ============================================================================
-// IMU Hook — акселерометр + компас
+// IMU Hook — акселерометр + компас (iOS + Android)
 // ============================================================================
 
 import { useState, useRef, useCallback, useEffect } from "react";
@@ -8,13 +8,35 @@ import type { IMUSnapshot } from "@/types/taximeter";
 export interface UseIMUReturn {
   snapshot: IMUSnapshot | null;
   isSupported: boolean;
+  permissionGranted: boolean;
+  requestPermission: () => Promise<boolean>;
   startListening: () => void;
   stopListening: () => void;
+}
+
+/**
+ * iOS 13+ требует явного разрешения пользователя для DeviceOrientationEvent.
+ */
+async function requestIosPermission(): Promise<boolean> {
+  // DeviceOrientationEvent.requestPermission() существует только на iOS 13+
+  const permissable = (DeviceOrientationEvent as unknown) as {
+    requestPermission?: () => Promise<PermissionState>;
+  };
+  if (typeof permissable.requestPermission !== "function") {
+    return true; // Не iOS — разрешение не требуется
+  }
+  try {
+    const state = await permissable.requestPermission();
+    return state === "granted";
+  } catch {
+    return false;
+  }
 }
 
 export function useIMU(): UseIMUReturn {
   const [snapshot, setSnapshot] = useState<IMUSnapshot | null>(null);
   const [isSupported, setIsSupported] = useState(false);
+  const [permissionGranted, setPermissionGranted] = useState(false);
   const orientationRef = useRef<number | null>(null);
   const accelListenerRef = useRef<boolean>(false);
 
@@ -58,6 +80,12 @@ export function useIMU(): UseIMUReturn {
     [],
   );
 
+  const requestPermission = useCallback(async (): Promise<boolean> => {
+    const granted = await requestIosPermission();
+    setPermissionGranted(granted);
+    return granted;
+  }, []);
+
   const startListening = useCallback(() => {
     if (accelListenerRef.current) return;
 
@@ -88,6 +116,8 @@ export function useIMU(): UseIMUReturn {
   return {
     snapshot,
     isSupported,
+    permissionGranted,
+    requestPermission,
     startListening,
     stopListening,
   };

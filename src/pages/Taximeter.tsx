@@ -174,6 +174,9 @@ export default function Taximeter() {
     };
   }, []);
 
+  // Pull-to-refresh уже предотвращён через CSS: overscroll-behavior: none + body { overflow: hidden; position: fixed }
+  // Ничего дополнительно делать не нужно
+
   // Current Ktod
   const currentKtod = computeKtod(new Date(), ktodCoeffs);
   const currentTariff: TariffConfig = {
