@@ -106,6 +106,73 @@ export default function Taximeter() {
     startTime: number;
     distanceM: number;
   }>({ startTime: 0, distanceM: 0 });
+  const wakeLockRef = useRef<WakeLockSentinel | null>(null);
+
+  // Screen Wake Lock — предотвращает затухание экрана во время поездки
+  const requestWakeLock = useCallback(async () => {
+    try {
+      if (!navigator.wakeLock) {
+        addEvent("system", "Wake Lock API не поддерживается браузером");
+        return;
+      }
+      // Освобождаем предыдущий блокировщик, если есть
+      if (wakeLockRef.current) {
+        await wakeLockRef.current.release();
+        wakeLockRef.current = null;
+      }
+      const sentinel = await navigator.wakeLock.request("screen");
+      wakeLockRef.current = sentinel;
+      addEvent("system", "Экран заблокирован от затухания");
+
+      // Автоматическое восстановление блокировки, если ОС её сняла
+      sentinel.addEventListener("release", () => {
+        // Если поездка всё ещё активна — запрашиваем повторно
+        if (statusRef.current === "in_progress") {
+          addEvent("warn", "Блокировка экрана снята системой — восстанавливаем...");
+          navigator.wakeLock.request("screen").then((newSentinel) => {
+            wakeLockRef.current = newSentinel;
+            addEvent("system", "Блокировка экрана восстановлена");
+            // Снова подписываемся на освобождение
+            newSentinel.addEventListener("release", () => {
+              if (statusRef.current === "in_progress") {
+                requestWakeLock();
+              }
+            });
+          }).catch(() => {
+            addEvent("warn", "Не удалось восстановить блокировку экрана");
+          });
+        }
+      });
+    } catch (err) {
+      addEvent("warn", `Wake Lock не удался: ${(err as Error).message}`);
+    }
+  }, [addEvent]);
+
+  const releaseWakeLock = useCallback(async () => {
+    if (wakeLockRef.current) {
+      try {
+        await wakeLockRef.current.release();
+        addEvent("system", "Блокировка экрана снята");
+      } catch {
+        // игнорируем ошибки освобождения
+      }
+      wakeLockRef.current = null;
+    }
+  }, [addEvent]);
+
+  // Реф для статуса, чтобы Wake Lock колбэк имел доступ к актуальному статусу
+  const statusRef = useRef<typeof status>(status);
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
+
+  // Освобождаем блокировку при размонтировании
+  useEffect(() => {
+    return () => {
+      wakeLockRef.current?.release().catch(() => {});
+      wakeLockRef.current = null;
+    };
+  }, []);
 
   // Current Ktod
   const currentKtod = computeKtod(new Date(), ktodCoeffs);
@@ -239,6 +306,9 @@ export default function Taximeter() {
   const handleStartTrip = useCallback(() => {
     const now = Date.now();
 
+    // Запрашиваем блокировку экрана
+    requestWakeLock();
+
     // Start GPS if not already
     if (!isWatching && !isSimulating) {
       startWatching();
@@ -266,6 +336,7 @@ export default function Taximeter() {
   const handleEndTrip = useCallback(() => {
     stopTimer();
     sim.stop();
+    releaseWakeLock();
 
     const endTime = Date.now();
     const durationSec = (endTime - tripDataRef.current.startTime) / 1000;
@@ -300,6 +371,7 @@ export default function Taximeter() {
     stopTimer();
     sim.stop();
     stopWatching();
+    releaseWakeLock();
     setStatus("ready");
     setRoute(null);
     setFromPlace(null);
