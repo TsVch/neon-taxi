@@ -271,7 +271,9 @@ export function useGPS(): UseGPSReturn {
       timestamp: number,
       isSim: boolean,
     ) => {
-      const quality = isSim ? "sim" : classifyAccuracy(accuracy);
+      const quality = isSim
+        ? (accuracy > GPS_CONSTANTS.POOR_THRESHOLD ? "dead_reck" : "sim")
+        : classifyAccuracy(accuracy);
 
       const gpsPoint: GpsPoint = {
         lat,
@@ -339,7 +341,9 @@ export function useGPS(): UseGPSReturn {
       }
 
       // Process based on quality tier
-      if (quality === "good" || quality === "sim") {
+      // Симулированная потеря GPS (quality='dead_reck' + isSim=true) обрабатывается как хороший сигнал,
+      // но с сохранением качества 'dead_reck' в smoothState для корректного отображения в UI
+      if (quality === "good" || quality === "sim" || (quality === "dead_reck" && isSim)) {
         // Tier 1: Accept position and speed
         if (isFirstFixRef.current) {
           smoothLatRef.current = lat;
@@ -593,14 +597,12 @@ export function useGPS(): UseGPSReturn {
   }, [addEvent, stopDRTimer, imu]);
 
   // Add simulated point (с поддержкой точности от сценария)
+  // Всегда передаём isSim=true — accuracy определяет качество (10='sim', 999='dead_reck')
   const addSimulatedPoint = useCallback(
     (lat: number, lon: number, speed: number, accuracy?: number) => {
       const now = Date.now();
       const acc = accuracy ?? 10 + Math.random() * 10;
-      // Если accuracy > 500 — симулируем потерю GPS: не отмечаем как isSim,
-      // чтобы processPosition сам классифицировал как dead_reck и запустил DR
-      const isRealGpsLoss = acc > GPS_CONSTANTS.POOR_THRESHOLD;
-      processPosition(lat, lon, acc, speed, null, now, !isRealGpsLoss);
+      processPosition(lat, lon, acc, speed, null, now, true);
     },
     [processPosition],
   );
