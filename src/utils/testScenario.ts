@@ -232,12 +232,16 @@ export class ScenarioRunner {
   private scenario: ScenarioDef;
   private cumulative: number[];
   private totalDistM: number;
+  private deviationCumulative: number[];
   private state: RunnerState;
 
   constructor(scenario: ScenarioDef = TEST_SCENARIO) {
     this.scenario = scenario;
     this.cumulative = cumulativeMeters(scenario.route);
     this.totalDistM = this.cumulative[this.cumulative.length - 1] || 1;
+    this.deviationCumulative = scenario.deviationRoute
+      ? cumulativeMeters(scenario.deviationRoute)
+      : [];
     this.state = this.initialState();
   }
 
@@ -292,7 +296,6 @@ export class ScenarioRunner {
 
   advance(distDeltaM: number): void {
     const s = this.state;
-    if (s.routeIndex >= this.scenario.route.length - 1) return;
 
     s.eventFlags = {
       gpsLost: false, gpsRestored: false,
@@ -312,80 +315,113 @@ export class ScenarioRunner {
     }
 
     if (s.isDeviated && this.scenario.deviationRoute) {
-      this.advanceOnDeviation(distDeltaM);
-      return;
+      this.updatePositionOnDeviationRoute();
+    } else {
+      this.updatePositionOnMainRoute();
     }
 
-    this.advanceOnMain(distDeltaM);
-  }
-
-  private advanceOnMain(distDeltaM: number): void {
-    const s = this.state;
-    const route = this.scenario.route;
-    if (s.routeIndex >= route.length - 1) return;
-
-    let remaining = distDeltaM;
-    while (remaining > 0 && s.routeIndex < route.length - 1) {
-      const from = route[s.routeIndex];
-      const to = route[s.routeIndex + 1];
-      const segDist = haversineMeters(from[0], from[1], to[0], to[1]);
-
-      if (segDist <= remaining) {
-        remaining -= segDist;
-        s.routeIndex++;
-        s.currentPoint = [...route[s.routeIndex]] as [number, number];
-      } else {
-        const t = remaining / segDist;
-        s.currentPoint = [
-          from[0] + (to[0] - from[0]) * t,
-          from[1] + (to[1] - from[1]) * t,
-        ];
-        remaining = 0;
-      }
-    }
     s.currentSpeedMs = (this.scenario.defaultSpeedKmh * 1000) / 3600;
   }
 
-  private advanceOnDeviation(distDeltaM: number): void {
+  /**
+   * Вычисляет позицию на основном маршруте из накопленной дистанции distanceM.
+   * Использует cumulative-массив для поиска нужного сегмента — позиция всегда
+   * соответствует реальному пройденному расстоянию, а не застревает в первом сегменте.
+   */
+  private updatePositionOnMainRoute(): void {
+    const s = this.state;
+    const route = this.scenario.route;
+    const cum = this.cumulative;
+
+    if (s.distanceM >= this.totalDistM) {
+      s.routeIndex = route.length - 1;
+      s.currentPoint = [...route[route.length - 1]] as [number, number];
+      return;
+    }
+
+    // Binary search: find segment where cum[i] <= distanceM < cum[i+1]
+    let lo = 0;
+    let hi = cum.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (cum[mid] <= s.distanceM) lo = mid;
+      else hi = mid - 1;
+    }
+    const segIdx = Math.min(lo, route.length - 2);
+
+    const segStart = cum[segIdx];
+    const segEnd = cum[segIdx + 1];
+    const segLen = segEnd - segStart;
+    const t = segLen > 0 ? Math.min(1, (s.distanceM - segStart) / segLen) : 0;
+
+    s.routeIndex = segIdx;
+    s.currentPoint = lerp(route[segIdx], route[segIdx + 1], t);
+  }
+
+  /**
+   * Вычисляет позицию на маршруте отклонения из накопленной дистанции deviationOffsetM.
+   * Отсчёт deviationOffsetM ведётся от начала deviationRoute.
+   */
+  private updatePositionOnDeviationRoute(): void {
     const s = this.state;
     const devRoute = this.scenario.deviationRoute!;
-    if (s.deviationIndex >= devRoute.length - 1) return;
+    const cum = this.deviationCumulative;
+    const devTotal = cum[cum.length - 1] || 1;
 
-    let remaining = distDeltaM;
-    while (remaining > 0 && s.deviationIndex < devRoute.length - 1) {
-      const from = devRoute[s.deviationIndex];
-      const to = devRoute[s.deviationIndex + 1];
-      const segDist = haversineMeters(from[0], from[1], to[0], to[1]);
-      if (segDist <= remaining) {
-        remaining -= segDist;
-        s.deviationIndex++;
-        s.currentPoint = [...devRoute[s.deviationIndex]] as [number, number];
-      } else {
-        const t = remaining / segDist;
-        s.currentPoint = [
-          from[0] + (to[0] - from[0]) * t,
-          from[1] + (to[1] - from[1]) * t,
-        ];
-        remaining = 0;
+    // Сколько метров пройдено по deviationRoute (начиная с 0)
+    const devOffset = s.distanceM - this.getDeviationStartDistM();
+
+    if (devOffset >= devTotal) {
+      // Прошли всю deviationRoute — возвращаемся на основной маршрут
+      s.isDeviated = false;
+      s.deviationIndex = devRoute.length - 1;
+      s.currentPoint = [...devRoute[devRoute.length - 1]] as [number, number];
+      this.snapBack();
+      return;
+    }
+
+    // Binary search on deviation cumulative
+    let lo = 0;
+    let hi = cum.length - 1;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (cum[mid] <= devOffset) lo = mid;
+      else hi = mid - 1;
+    }
+    const segIdx = Math.min(lo, devRoute.length - 2);
+
+    const segStart = cum[segIdx];
+    const segEnd = cum[segIdx + 1];
+    const segLen = segEnd - segStart;
+    const t = segLen > 0 ? Math.min(1, (devOffset - segStart) / segLen) : 0;
+
+    s.deviationIndex = segIdx;
+    s.currentPoint = lerp(devRoute[segIdx], devRoute[segIdx + 1], t);
+  }
+
+  /**
+   * Возвращает distanceM, на котором началось отклонение.
+   * Определяется по событию route_deviation (triggerKm).
+   */
+  private getDeviationStartDistM(): number {
+    for (const evt of this.scenario.events) {
+      if (evt.type === "route_deviation") {
+        return evt.triggerKm * 1000;
       }
     }
-
-    if (s.deviationIndex >= devRoute.length - 1) {
-      s.isDeviated = false;
-      this.snapBack();
-    }
+    return 5000; // fallback: 5km
   }
 
   private snapBack(): void {
     const s = this.state;
     const route = this.scenario.route;
-    let bestIdx = s.routeIndex;
+    let bestIdx = Math.min(s.routeIndex, route.length - 1);
     let bestDist = Infinity;
-    for (let i = s.routeIndex; i < route.length; i++) {
+    for (let i = 0; i < route.length; i++) {
       const d = haversineMeters(s.currentPoint[0], s.currentPoint[1], route[i][0], route[i][1]);
       if (d < bestDist) { bestDist = d; bestIdx = i; }
     }
-    s.routeIndex = Math.min(bestIdx, route.length - 1);
+    s.routeIndex = Math.min(bestIdx, route.length - 2);
     s.currentPoint = [...route[s.routeIndex]] as [number, number];
   }
 
