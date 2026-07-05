@@ -75,13 +75,20 @@ export function useSimulator(): UseSimulatorReturn {
         const runner = new ScenarioRunner(scenario);
         scenarioRef.current = runner;
 
-        // Первая точка
-        const state = runner.getState();
-        setScenarioState({ ...state });
-
-        // Скорость эмиссии: ~ 1 км за ~80 сек при 45 км/ч = 1 точка каждые 2 сек
+        // Скорость эмиссии: ~ 1 точка каждые ~1.5 сек
         // На каждый шаг продвигаемся на ~25 метров
         const stepMeters = 25;
+
+        // ОТПРАВЛЯЕМ ПЕРВУЮ ТОЧКУ НЕМЕДЛЕННО (без задержки 1500мс)
+        // чтобы пользователь сразу увидел оранжевую точку на карте
+        const initialAcc = 10;
+        const initialSpeedMs = (scenario.defaultSpeedKmh * 1000) / 3600;
+        const initialPoint = runner.startPoint;
+        if (initialPoint) {
+          onPoint(initialPoint[0], initialPoint[1], initialSpeedMs, initialAcc);
+        }
+        const initialState = runner.getState();
+        setScenarioState({ ...initialState });
 
         const scenarioInterval = setInterval(() => {
           const currentRunner = scenarioRef.current;

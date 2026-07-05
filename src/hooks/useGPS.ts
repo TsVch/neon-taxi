@@ -294,44 +294,47 @@ export function useGPS(): UseGPSReturn {
       // Update last GPS time (resets DR timer) — только для ПРИНЯТЫХ точек
       lastGpsTimeRef.current = timestamp;
 
-      // Jump Guard: detect speed jumps > 55 m/s
-      if (
-        !isFirstFixRef.current &&
-        speed !== null &&
-        speed > GPS_CONSTANTS.MAX_SPEED_M_S
-      ) {
-        addEvent("warn", `Скачок скорости обнаружен: ${(speed * 3.6).toFixed(0)} км/ч — игнорируем`, {
-          speed,
-          maxAllowed: GPS_CONSTANTS.MAX_SPEED_M_S,
-        });
-        // Don't update smooth state — use last good point
-        if (lastGoodPointRef.current) {
-          return;
+      // Симулированные точки пропускают jump guard и spoofing — они синтетические
+      if (!isSim) {
+        // Jump Guard: detect speed jumps > 55 m/s
+        if (
+          !isFirstFixRef.current &&
+          speed !== null &&
+          speed > GPS_CONSTANTS.MAX_SPEED_M_S
+        ) {
+          addEvent("warn", `Скачок скорости обнаружен: ${(speed * 3.6).toFixed(0)} км/ч — игнорируем`, {
+            speed,
+            maxAllowed: GPS_CONSTANTS.MAX_SPEED_M_S,
+          });
+          // Don't update smooth state — use last good point
+          if (lastGoodPointRef.current) {
+            return;
+          }
         }
-      }
 
-      // GPS Spoofing detection: check if position is unreasonably far
-      if (
-        !isFirstFixRef.current &&
-        lastGoodPointRef.current
-      ) {
-        const distFromLast = haversineMeters(
-          lastGoodPointRef.current.lat,
-          lastGoodPointRef.current.lon,
-          lat,
-          lon,
-        );
-        const timeDelta = (timestamp - lastTimestampRef.current) / 1000;
-        const maxAllowedDist = GPS_CONSTANTS.MAX_SPEED_M_S * timeDelta * 1.5;
-
-        if (distFromLast > maxAllowedDist && timeDelta > 1) {
-          addEvent(
-            "warn",
-            `Телепортация обнаружена: ${distFromLast.toFixed(0)}м за ${timeDelta.toFixed(1)}с — откат к последней точке`,
-            { distFromLast, maxAllowedDist, timeDelta },
+        // GPS Spoofing detection: check if position is unreasonably far
+        if (
+          !isFirstFixRef.current &&
+          lastGoodPointRef.current
+        ) {
+          const distFromLast = haversineMeters(
+            lastGoodPointRef.current.lat,
+            lastGoodPointRef.current.lon,
+            lat,
+            lon,
           );
-          // Don't update — keep last good point
-          return;
+          const timeDelta = (timestamp - lastTimestampRef.current) / 1000;
+          const maxAllowedDist = GPS_CONSTANTS.MAX_SPEED_M_S * timeDelta * 1.5;
+
+          if (distFromLast > maxAllowedDist && timeDelta > 1) {
+            addEvent(
+              "warn",
+              `Телепортация обнаружена: ${distFromLast.toFixed(0)}м за ${timeDelta.toFixed(1)}с — откат к последней точке`,
+              { distFromLast, maxAllowedDist, timeDelta },
+            );
+            // Don't update — keep last good point
+            return;
+          }
         }
       }
 
@@ -602,11 +605,40 @@ export function useGPS(): UseGPSReturn {
     [processPosition],
   );
 
+  // Reset all GPS state refs for a clean start
+  const resetGpsState = useCallback(() => {
+    isFirstFixRef.current = true;
+    smoothLatRef.current = 0;
+    smoothLonRef.current = 0;
+    smoothSpeedRef.current = 0;
+    lastGoodPointRef.current = null;
+    lastTimestampRef.current = 0;
+    lastGpsTimeRef.current = Date.now();
+    totalDistRef.current = 0;
+    smoothStateRef.current = null;
+    setSmoothState(null);
+    setTotalDistanceM(0);
+    setDeadReckoning({
+      active: false,
+      elapsedSinceLastGPS: 0,
+      lastSpeed: 0,
+      decayFactor: 1,
+      estimatedLat: 0,
+      estimatedLon: 0,
+      heading: null,
+      imuHeading: null,
+      imuMoving: null,
+      imuSupported: false,
+    });
+    setRecentPoints([]);
+  }, []);
+
   // Set simulating
   const setSimulating = useCallback(
     (v: boolean) => {
       setIsSimulating(v);
       if (v) {
+        resetGpsState();
         stopWatching();
         addEvent("system", "Симулятор GPS активирован");
       } else {
@@ -614,7 +646,7 @@ export function useGPS(): UseGPSReturn {
         startWatching();
       }
     },
-    [stopWatching, startWatching, addEvent],
+    [stopWatching, startWatching, addEvent, resetGpsState],
   );
 
   // Cleanup on unmount

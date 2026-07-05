@@ -343,7 +343,7 @@ export class ScenarioRunner {
         remaining = 0;
       }
     }
-    s.currentSpeedMs = Math.max(1, distDeltaM);
+    s.currentSpeedMs = (this.scenario.defaultSpeedKmh * 1000) / 3600;
   }
 
   private advanceOnDeviation(distDeltaM: number): void {
