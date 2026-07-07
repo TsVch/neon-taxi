@@ -68,9 +68,12 @@ export default function EventLog({ events, onClear }: EventLogProps) {
       ? events
       : events.filter((e) => e.type === filter);
 
-  // Auto-scroll to bottom
+  // Auto-scroll within the ScrollArea viewport (not the entire page)
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+    const viewport = bottomRef.current?.closest('[data-slot="scroll-area-viewport"]');
+    if (viewport) {
+      viewport.scrollTop = viewport.scrollHeight;
+    }
   }, [filteredEvents.length]);
 
   const filters: Array<{ value: EventType | "all"; label: string }> = [
