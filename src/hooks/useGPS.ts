@@ -138,6 +138,7 @@ export function useGPS(): UseGPSReturn {
       const isLogTick = drLogCountRef.current % 5 === 0; // Логируем DR каждые 5с
       drLogCountRef.current++;
 
+      if (elapsedSinceLastGPS >= GPS_CONSTANTS.DR_TIMEOUT_MS / 1000) {
         // Получаем последние данные с IMU
         const imuSnap = imuSnapshotRef.current;
         const imuHeading = imuSnap?.heading ?? null;
@@ -166,10 +167,10 @@ export function useGPS(): UseGPSReturn {
             );
           } else if (imuAccel < 0.15) {
             // Очень низкая вибрация — замедление, ускоренный спад
-            drSpeed = smoothSpeedRef.current * Math.max(decayFactor, 0.5);
+            drSpeed = smoothSpeedRef.current * Math.max(deadReckoningRef.current.decayFactor, 0.5);
           } else {
             // Нормальное движение — стандартный спад
-            drSpeed = smoothSpeedRef.current * Math.max(decayFactor, 0.7);
+            drSpeed = smoothSpeedRef.current * Math.max(deadReckoningRef.current.decayFactor, 0.7);
           }
 
           distanceDr = drSpeed * timeDelta;
@@ -191,7 +192,7 @@ export function useGPS(): UseGPSReturn {
           active: true,
           elapsedSinceLastGPS,
           lastSpeed: smoothSpeedRef.current,
-          decayFactor,
+          decayFactor: deadReckoningRef.current.decayFactor,
           estimatedLat: estLat,
           estimatedLon: estLon,
           heading: effectiveHeading,
@@ -230,7 +231,7 @@ export function useGPS(): UseGPSReturn {
           addEvent("dr", drMsg, {
             elapsedSinceLastGPS,
             drSpeed,
-            decayFactor,
+            decayFactor: deadReckoningRef.current.decayFactor,
             imuHeading,
             imuMoving,
             imuAccel,
