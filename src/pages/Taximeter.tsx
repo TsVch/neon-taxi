@@ -435,6 +435,15 @@ export default function Taximeter() {
     };
   }, [stopTimer]);
 
+  // Auto-start GPS навигации при загрузке (если не в режиме симулятора)
+  useEffect(() => {
+    if (!isSimulating && !isWatching && status === "ready") {
+      addEvent("system", "Автозапуск GPS...");
+      startWatching();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   // Estmated values for price calculation
   const estimatedDistanceKm = route ? route.totalDistanceM / 1000 : 5;
   const estimatedDurationMin = route ? route.totalDurationS / 60 : 15;

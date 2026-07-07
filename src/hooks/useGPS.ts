@@ -90,6 +90,7 @@ export function useGPS(): UseGPSReturn {
   const totalDistRef = useRef(0);
   const isFirstFixRef = useRef(true);
   const drTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const drLogCountRef = useRef(0);
   const eventsRef = useRef<LogEvent[]>([]);
   const smoothStateRef = useRef<SmoothGpsState | null>(null);
   const deadReckoningRef = useRef<DeadReckoningState>({
@@ -129,17 +130,13 @@ export function useGPS(): UseGPSReturn {
   // Dead Reckoning timer — runs every 1 second when no GPS updates
   const startDRTimer = useCallback(() => {
     if (drTimerRef.current) return;
+    drLogCountRef.current = 0;
 
     drTimerRef.current = setInterval(() => {
       const now = Date.now();
       const elapsedSinceLastGPS = (now - lastGpsTimeRef.current) / 1000;
-
-      if (elapsedSinceLastGPS > GPS_CONSTANTS.DR_TIMEOUT_MS / 1000) {
-        // Activate Dead Reckoning
-        const decayFactor = Math.max(
-          GPS_CONSTANTS.DR_DECAY_FACTOR,
-          1 - elapsedSinceLastGPS / 60,
-        );
+      const isLogTick = drLogCountRef.current % 5 === 0; // Логируем DR каждые 5с
+      drLogCountRef.current++;
 
         // Получаем последние данные с IMU
         const imuSnap = imuSnapshotRef.current;
@@ -225,17 +222,20 @@ export function useGPS(): UseGPSReturn {
         smoothStateRef.current = drState;
         setSmoothState(drState);
 
-        const drMsg = imuMoving === false
-          ? `DR: СТОП (IMU: нет движения)`
-          : `DR: ${drSpeed.toFixed(1)} м/с, ${effectiveHeading.toFixed(0)}°${imuHeading !== null ? ' (IMU)' : ''}${imuAccel > 0.8 ? ' ускорение' : ''}`;
-        addEvent("dr", drMsg, {
-          elapsedSinceLastGPS,
-          drSpeed,
-          decayFactor,
-          imuHeading,
-          imuMoving,
-          imuAccel,
-        });
+        // Логируем DR только каждые 5с (не каждый 1с)
+        if (isLogTick) {
+          const drMsg = imuMoving === false
+            ? `DR: СТОП (IMU: нет движения)`
+            : `DR: ${drSpeed.toFixed(1)} м/с, ${effectiveHeading.toFixed(0)}°${imuHeading !== null ? ' (IMU)' : ''}${imuAccel > 0.8 ? ' ускорение' : ''}`;
+          addEvent("dr", drMsg, {
+            elapsedSinceLastGPS,
+            drSpeed,
+            decayFactor,
+            imuHeading,
+            imuMoving,
+            imuAccel,
+          });
+        }
       } else {
         // Not yet in DR mode, but update elapsed time and IMU info
         const imuSnap = imuSnapshotRef.current;
@@ -408,13 +408,8 @@ export function useGPS(): UseGPSReturn {
           smoothStateRef.current = newState;
           setSmoothState(newState);
 
-          if (distDelta >= GPS_CONSTANTS.MIN_MOVEMENT_M) {
-            addEvent("gps", `Позиция обновлена: +${distDelta.toFixed(1)}м, скорость ${(newSpeed * 3.6).toFixed(0)} км/ч`, {
-              distDelta,
-              speedKmh: newSpeed * 3.6,
-              accuracy,
-            });
-          }
+          // Лог только при значительных изменениях (>500м от последнего лога или смена качества)
+          // Убираем каждосекундный лог 'Позиция обновлена', оставляем только ключевые события
         }
       } else if (quality === "degraded") {
         // Tier 2: Accept position cautiously, prefer Doppler speed
@@ -465,10 +460,7 @@ export function useGPS(): UseGPSReturn {
           smoothStateRef.current = newState;
           setSmoothState(newState);
 
-          addEvent("gps", `Degraded GPS: скорость ${(newSpeed * 3.6).toFixed(0)} км/ч`, {
-            accuracy,
-            distBySpeed,
-          });
+          // Degraded — не логируем каждое обновление, только если quality изменился с good/dead_reck
         }
       } else if (quality === "poor") {
         // Tier 3: Ignore position, use Doppler speed only
@@ -562,6 +554,17 @@ export function useGPS(): UseGPSReturn {
     } else if (imu.isSupported) {
       startImu();
     }
+
+    // Мгновенный первый fix через getCurrentPosition (для отображения на карте сразу)
+    navigator.geolocation.getCurrentPosition(
+      handlePosition,
+      handleError,
+      {
+        enableHighAccuracy: true,
+        timeout: 15000,
+        maximumAge: 5000,
+      },
+    );
 
     const watchId = navigator.geolocation.watchPosition(
       handlePosition,
