@@ -47,8 +47,7 @@ import {
   MapPin,
   Wifi,
   WifiOff,
-  Battery,
-  BatteryCharging,
+  AlertTriangle,
 } from "lucide-react";
 
 function formatDuration(seconds: number): string {
@@ -66,6 +65,7 @@ export default function Taximeter() {
     isWatching,
     startWatching,
     stopWatching,
+    retryWatching,
     addSimulatedPoint,
     events,
     addEvent,
@@ -73,6 +73,7 @@ export default function Taximeter() {
     totalDistanceM,
     isSimulating,
     setSimulating,
+    lastError,
   } = useGPS();
 
   // Simulator
@@ -444,13 +445,16 @@ export default function Taximeter() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Estmated values for price calculation
+  // Estimated values for price calculation
   const estimatedDistanceKm = route ? route.totalDistanceM / 1000 : 5;
   const estimatedDurationMin = route ? route.totalDurationS / 60 : 15;
 
   // GPS status
   const gpsQuality = smoothState?.quality || null;
   const gpsSpeedKmh = smoothState ? smoothState.speed * 3.6 : 0;
+
+  // Состояние: GPS запущен, но долго нет fix'а (>15 секунд без smoothState)
+  const gpsWaitingLong = isWatching && !smoothState && !isSimulating;
 
   return (
     <div className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950 text-white">
@@ -591,7 +595,7 @@ export default function Taximeter() {
                   ) : gpsQuality === "dead_reck" ? (
                     <Wifi className="h-4 w-4 text-orange-400 animate-pulse" />
                   ) : (
-                    <WifiOff className="h-4 w-4 text-white/20" />
+                    <WifiOff className="h-4 w-4 text-red-400" />
                   )}
                   <span className="text-xs font-medium text-white/60 uppercase tracking-wider">
                     GPS
@@ -605,7 +609,8 @@ export default function Taximeter() {
                     ${gpsQuality === "degraded" ? "border-yellow-500/30 text-yellow-400" : ""}
                     ${gpsQuality === "poor" ? "border-orange-500/30 text-orange-400" : ""}
                     ${gpsQuality === "dead_reck" ? "border-red-500/30 text-red-400" : ""}
-                    ${!gpsQuality ? "border-white/10 text-white/30" : ""}
+                    ${!gpsQuality && isWatching ? "border-yellow-500/30 text-yellow-400" : ""}
+                    ${!gpsQuality && !isWatching ? "border-red-500/30 text-red-400" : ""}
                   `}
                 >
                   {gpsQuality === "good" ? "Хороший" :
@@ -613,9 +618,59 @@ export default function Taximeter() {
                    gpsQuality === "poor" ? "Плохой" :
                    gpsQuality === "dead_reck" ? "DR" :
                    gpsQuality === "sim" ? "SIM" :
-                   "Нет сигнала"}
+                   isWatching ? "Поиск..." :
+                   "Выкл"}
                 </Badge>
               </div>
+
+              {/* GPS Error Banner */}
+              {lastError && (
+                <div className="mb-3 p-3 rounded-lg bg-red-500/10 border border-red-500/30">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="h-4 w-4 text-red-400 shrink-0 mt-0.5" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[11px] text-red-300 leading-relaxed">{lastError}</p>
+                    </div>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="mt-2 w-full text-[10px] h-7 border-red-500/30 text-red-400 hover:bg-red-500/10"
+                    onClick={() => {
+                      addEvent("system", "Повторный запуск GPS...");
+                      retryWatching();
+                    }}
+                  >
+                    Повторить
+                  </Button>
+                </div>
+              )}
+
+              {/* GPS ожидание — долго нет fix'а */}
+              {gpsWaitingLong && !lastError && (
+                <div className="mb-3 p-3 rounded-lg bg-yellow-500/10 border border-yellow-500/30">
+                  <div className="flex items-start gap-2">
+                    <AlertTriangle className="h-4 w-4 text-yellow-400 shrink-0 mt-0.5 animate-pulse" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[11px] text-yellow-300 leading-relaxed">
+                        Ожидание GPS сигнала... Убедитесь, что геолокация включена и вы находитесь на улице.
+                      </p>
+                    </div>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="mt-2 w-full text-[10px] h-7 border-yellow-500/30 text-yellow-400 hover:bg-yellow-500/10"
+                    onClick={() => {
+                      addEvent("system", "Повторный запуск GPS...");
+                      retryWatching();
+                    }}
+                  >
+                    Повторить запрос
+                  </Button>
+                </div>
+              )}
+
               {gpsQuality && (
                 <div className="grid grid-cols-3 gap-2 text-center">
                   <div>

@@ -22,7 +22,8 @@ export interface UseGPSReturn {
   isWatching: boolean;
   startWatching: () => void;
   stopWatching: () => void;
-  addSimulatedPoint: (lat: number, lon: number, speed: number) => void;
+  retryWatching: () => void;
+  addSimulatedPoint: (lat: number, lon: number, speed: number, accuracy?: number) => void;
   events: LogEvent[];
   addEvent: (type: LogEvent["type"], message: string, data?: Record<string, unknown>) => void;
   clearEvents: () => void;
@@ -32,6 +33,7 @@ export interface UseGPSReturn {
   imuSupported: boolean;
   imuActive: boolean;
   imuPermissionGranted: boolean;
+  lastError: string | null;
 }
 
 let eventIdCounter = 0;
@@ -79,6 +81,7 @@ export function useGPS(): UseGPSReturn {
   const [events, setEvents] = useState<LogEvent[]>([]);
   const [totalDistanceM, setTotalDistanceM] = useState(0);
   const [isSimulating, setIsSimulating] = useState(false);
+  const [lastError, setLastError] = useState<string | null>(null);
 
   // Refs for mutable state
   const watchIdRef = useRef<number | null>(null);
@@ -364,6 +367,7 @@ export function useGPS(): UseGPSReturn {
           };
           smoothStateRef.current = initialState;
           setSmoothState(initialState);
+          setLastError(null); // очищаем ошибку при первом fix'е
           addEvent("gps", `Первый GPS fix: точность ${accuracy.toFixed(0)}м`, {
             lat,
             lon,
@@ -521,7 +525,13 @@ export function useGPS(): UseGPSReturn {
 
   const handleError = useCallback(
     (err: GeolocationPositionError) => {
-      addEvent("error", `GPS ошибка: ${err.message}`, { code: err.code });
+      const msg = err.code === 1
+        ? "GPS заблокирован: разрешите доступ к геолокации в настройках браузера"
+        : err.code === 2
+          ? "GPS недоступен: не удалось определить местоположение (попробуйте выйти на улицу)"
+          : `GPS ошибка: ${err.message}`;
+      addEvent("error", msg, { code: err.code });
+      setLastError(msg);
     },
     [addEvent],
   );
@@ -655,9 +665,31 @@ export function useGPS(): UseGPSReturn {
     [stopWatching, startWatching, addEvent, resetGpsState],
   );
 
-  // Cleanup on unmount
+  // Принудительная перезагрузка GPS (сброс watchIdRef + перезапуск)
+  const retryWatching = useCallback(() => {
+    // Принудительно сбрасываем watchIdRef, чтобы startWatching не заблокировался
+    if (watchIdRef.current !== null) {
+      try {
+        navigator.geolocation.clearWatch(watchIdRef.current);
+      } catch {}
+      watchIdRef.current = null;
+    }
+    setIsWatching(false);
+    stopDRTimer();
+    setLastError(null);
+    // Небольшая задержка, чтобы state успел обновиться
+    setTimeout(() => startWatching(), 100);
+  }, [startWatching, stopDRTimer]);
+
+  // Cleanup on unmount — ПОЛНЫЙ сброс watchPosition + DR timer
   useEffect(() => {
     return () => {
+      if (watchIdRef.current !== null) {
+        try {
+          navigator.geolocation.clearWatch(watchIdRef.current);
+        } catch {}
+        watchIdRef.current = null;
+      }
       stopDRTimer();
     };
   }, [stopDRTimer]);
@@ -669,6 +701,7 @@ export function useGPS(): UseGPSReturn {
     isWatching,
     startWatching,
     stopWatching,
+    retryWatching,
     addSimulatedPoint,
     events,
     addEvent,
@@ -679,5 +712,6 @@ export function useGPS(): UseGPSReturn {
     imuSupported: imu.isSupported,
     imuActive: imu.snapshot !== null && imu.isSupported,
     imuPermissionGranted: imu.permissionGranted,
+    lastError,
   };
 }
